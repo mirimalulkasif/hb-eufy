@@ -26,7 +26,7 @@
         "title": "Country code",
         "type": "string",
         "default": "US",
-        "description": "ISO country used by the Eufy cloud (e.g. US, DE, IL).",
+        "description": "Must match the country/region selected in the Eufy mobile app for this account (e.g. IL, US, DE). Wrong country often yields 0 devices.",
         "required": true
       },
       "trustedDeviceName": {
@@ -66,7 +66,8 @@
       "acceptInvitations": {
         "title": "Accept shared-device invitations",
         "type": "boolean",
-        "default": false
+        "default": true,
+        "description": "Keep enabled if cameras are shared to this Eufy account from another owner."
       },
       "ffmpegPath": {
         "title": "Custom ffmpeg path",

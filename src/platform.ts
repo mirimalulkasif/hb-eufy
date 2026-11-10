@@ -13,6 +13,7 @@ import type {
 import {
   Device,
   EufySecurity,
+  LogLevel,
   type EufySecurityConfig,
   PropertyName,
 } from 'eufy-security-client';
@@ -45,6 +46,8 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
   private readonly pollingMinutes: number;
   private refreshTimer?: NodeJS.Timeout;
   private discovering = false;
+  private emptyRefreshCount = 0;
+  private readonly country: string;
 
   constructor(
     public readonly log: Logging,
@@ -61,6 +64,7 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
       1,
       Number(config.pollingIntervalMinutes ?? DEFAULT_POLLING_MINUTES),
     );
+    this.country = String(config.country || DEFAULT_COUNTRY).toUpperCase();
 
     if (!fs.existsSync(this.persistDir)) {
       fs.mkdirSync(this.persistDir, { recursive: true });
@@ -105,10 +109,16 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
       return;
     }
 
+    // Default invitations ON — shared cameras are otherwise invisible.
+    const acceptInvitations =
+      this.config.acceptInvitations === undefined
+        ? true
+        : Boolean(this.config.acceptInvitations);
+
     const eufyConfig: EufySecurityConfig = {
       username,
       password,
-      country: String(this.config.country || DEFAULT_COUNTRY),
+      country: this.country,
       trustedDeviceName: String(this.config.trustedDeviceName || 'Homebridge'),
       persistentDir: this.persistDir,
       p2pConnectionSetup: Number(this.config.p2pConnectionSetup ?? DEFAULT_P2P_SETUP),
@@ -116,30 +126,19 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
         this.config.pollingIntervalMinutes ?? DEFAULT_POLLING_MINUTES,
       ),
       eventDurationSeconds: this.eventHoldSeconds,
-      acceptInvitations: Boolean(this.config.acceptInvitations),
+      acceptInvitations,
       enableEmbeddedPKCS1Support: true,
+      logging: { level: LogLevel.Info },
     };
+
+    this.log.info(
+      `Using Eufy country=${this.country}, acceptInvitations=${acceptInvitations}, persist=${this.persistDir}`,
+    );
 
     try {
       this.client = await EufySecurity.initialize(eufyConfig);
       this.bindClientEvents(this.client);
-
-      if (this.config.captchaId && this.config.captchaCode) {
-        await this.client.connect({
-          force: false,
-          captcha: {
-            captchaId: String(this.config.captchaId),
-            captchaCode: String(this.config.captchaCode),
-          },
-        });
-      } else if (this.config.mfaCode) {
-        await this.client.connect({
-          force: false,
-          verifyCode: String(this.config.mfaCode),
-        });
-      } else {
-        await this.client.connect({ force: false });
-      }
+      await this.connectClient(false);
 
       this.log.info('Connected to Eufy cloud.');
       await this.discover();
@@ -149,6 +148,28 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
       this.log.warn(
         'If the cloud asks for MFA/captcha, set mfaCode or captchaId/captchaCode in the plugin config and restart.',
       );
+    }
+  }
+
+  private async connectClient(force: boolean): Promise<void> {
+    if (!this.client) {
+      return;
+    }
+    if (this.config.captchaId && this.config.captchaCode) {
+      await this.client.connect({
+        force,
+        captcha: {
+          captchaId: String(this.config.captchaId),
+          captchaCode: String(this.config.captchaCode),
+        },
+      });
+    } else if (this.config.mfaCode) {
+      await this.client.connect({
+        force,
+        verifyCode: String(this.config.mfaCode),
+      });
+    } else {
+      await this.client.connect({ force });
     }
   }
 
@@ -176,6 +197,16 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
     }
     this.log.info('Refreshing Eufy devices…');
     try {
+      // If we keep getting an empty account, force a fresh cloud login once in a while.
+      if (this.handlers.size === 0) {
+        this.emptyRefreshCount += 1;
+        if (this.emptyRefreshCount === 2 || this.emptyRefreshCount % 5 === 0) {
+          this.log.warn('Still no devices — forcing Eufy re-login…');
+          await this.connectClient(true);
+        }
+      } else {
+        this.emptyRefreshCount = 0;
+      }
       await this.discover();
     } catch (err) {
       this.log.warn(`Refresh failed: ${String(err)}`);
@@ -278,7 +309,22 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
         devices = await this.loadDevices(10_000);
       }
 
-      this.log.info(`Cloud returned ${devices.length} device(s).`);
+      let stations: Awaited<ReturnType<EufySecurity['getStations']>> = [];
+      try {
+        stations = await this.client.getStations();
+      } catch (err) {
+        this.log.warn(`Could not load stations: ${String(err)}`);
+      }
+      this.log.info(
+        `Cloud returned ${devices.length} device(s), ${stations.length} station(s).`,
+      );
+      for (const station of stations) {
+        this.log.info(
+          `Station "${station.getName()}" sn=${station.getSerial()} ` +
+            `type=${station.getDeviceType()} model=${station.getModel() || '?'}`,
+        );
+      }
+
       const seen = new Set<string>();
       for (const device of devices) {
         const type = device.getDeviceType();
@@ -311,8 +357,12 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
       );
       if (this.handlers.size === 0) {
         this.log.warn(
-          'No doorbell/indoor cameras matched. Will keep retrying. ' +
-            'If this persists, confirm the Eufy account owns those cameras and try acceptInvitations / MFA.',
+          'Eufy cloud returned no usable cameras for this login. Common fixes:\n' +
+            `  1) Set country to the same region as the Eufy app (currently "${this.country}" — e.g. IL, US, DE).\n` +
+            '  2) Use the account that owns the cameras, or share them to this account and keep acceptInvitations enabled.\n' +
+            '  3) Delete the plugin cache folder and restart Homebridge:\n' +
+            `     ${this.persistDir}\n` +
+            '  4) If MFA was required, set mfaCode once, restart, then clear it.',
         );
       }
     } finally {

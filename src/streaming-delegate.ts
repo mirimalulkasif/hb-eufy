@@ -90,10 +90,17 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     request: SnapshotRequest,
     callback: SnapshotRequestCallback,
   ): void {
-    // Answer HomeKit immediately. Slow P2P/live grabs run in the background and
-    // only update the cache — waiting here makes the tile show "No Response".
-    callback(undefined, this.cachedSnapshot ?? placeholderJpeg());
-    void this.refreshSnapshotCache(request.width, request.height);
+    // Answer HomeKit immediately. Never open P2P on the snapshot path — that
+    // blocks the HAP event loop on 32-bit hosts and Home shows "No Response".
+    const image = this.cachedSnapshot ?? placeholderJpeg();
+    this.log.debug(
+      `Snapshot request ${this.displayName} ${request.width}x${request.height} (cache=${Boolean(this.cachedSnapshot)})`,
+    );
+    try {
+      callback(undefined, image);
+    } catch (err) {
+      this.log.warn(`Snapshot callback failed: ${String(err)}`);
+    }
   }
 
   prepareStream(
@@ -146,65 +153,20 @@ export class StreamingDelegate implements CameraStreamingDelegate {
   }
 
   private async doRefreshSnapshot(
-    width: number,
-    height: number,
+    _width: number,
+    _height: number,
   ): Promise<void> {
     try {
       const device = await this.client.getDevice(this.serial);
-      const cam = device.camera?.();
-      const stored = await cam?.snapshotStored?.();
+      const stored = await device.camera?.()?.snapshotStored?.();
       if (stored && stored.length > 100) {
         this.cachedSnapshot = stored;
-        return;
+        this.log.debug(
+          `Cached push thumbnail for ${this.displayName} (${stored.length} bytes)`,
+        );
       }
     } catch (err) {
       this.log.debug(`Stored snapshot unavailable: ${String(err)}`);
-    }
-
-    // Only attempt a live grab when we still have nothing useful cached.
-    if (this.cachedSnapshot && this.cachedSnapshot.length > 100) {
-      return;
-    }
-
-    try {
-      const jpeg = await Promise.race([
-        this.grabLiveSnapshot(width, height),
-        new Promise<undefined>((resolve) =>
-          setTimeout(() => resolve(undefined), 20_000),
-        ),
-      ]);
-      if (jpeg?.length) {
-        this.cachedSnapshot = jpeg;
-      }
-    } catch (err) {
-      this.log.debug(`Live snapshot unavailable: ${String(err)}`);
-    }
-  }
-
-  private async grabLiveSnapshot(
-    width: number,
-    height: number,
-  ): Promise<Buffer | undefined> {
-    try {
-      const device = await this.client.getDevice(this.serial);
-      const live = await device.camera?.()?.snapshotLive?.();
-      if (live?.jpeg?.length) {
-        return live.jpeg;
-      }
-    } catch {
-      // fall through to ffmpeg remux
-    }
-
-    const stream = await this.livestream.getStream();
-    try {
-      return await grabJpegFromStream(
-        this.ffmpegPath,
-        stream.videostream,
-        width,
-        height,
-      );
-    } finally {
-      this.livestream.release();
     }
   }
 

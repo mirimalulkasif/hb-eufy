@@ -16,7 +16,6 @@ export abstract class BaseCameraAccessory {
   protected readonly Service: typeof Service;
   protected readonly Characteristic: typeof Characteristic;
   protected motionService?: Service;
-  protected switchService?: Service;
   protected streaming?: StreamingDelegate;
   protected cameraController?: CameraController;
   private motionTimer?: NodeJS.Timeout;
@@ -40,10 +39,19 @@ export abstract class BaseCameraAccessory {
       .setCharacteristic(this.Characteristic.Manufacturer, 'Eufy')
       .setCharacteristic(this.Characteristic.Model, model || kind)
       .setCharacteristic(this.Characteristic.SerialNumber, serial)
-      .setCharacteristic(this.Characteristic.FirmwareRevision, '2.0.0');
+      .setCharacteristic(this.Characteristic.FirmwareRevision, '2.0.9');
+
+    // Drop the old Enabled switch if a previous version added it — its cloud reads
+    // could stall HAP on slow P2P hosts and mark the camera "No Response".
+    const staleSwitch = this.accessory.getServiceById(
+      this.Service.Switch,
+      'enabled',
+    );
+    if (staleSwitch) {
+      this.accessory.removeService(staleSwitch);
+    }
 
     this.setupMotion();
-    this.setupEnableSwitch();
     this.setupCameraStreaming();
   }
 
@@ -74,50 +82,9 @@ export abstract class BaseCameraAccessory {
       this.Characteristic.MotionDetected,
       false,
     );
-  }
-
-  private enabledCache = true;
-
-  private setupEnableSwitch(): void {
-    this.switchService = this.getOrAddService(
-      this.Service.Switch,
-      `${this.accessory.displayName} Enabled`,
-      'enabled',
-    );
-    // Never await cloud/P2P inside onGet — HomeKit marks the accessory "No Response".
-    this.switchService
-      .getCharacteristic(this.Characteristic.On)
-      .onGet(() => this.enabledCache)
-      .onSet(async (value) => {
-        const next = Boolean(value);
-        this.enabledCache = next;
-        try {
-          await this.client.setProperty(this.serial, 'enabled', next);
-        } catch (err) {
-          this.log.error(
-            `Failed to set enabled on ${this.serial}: ${String(err)}`,
-          );
-          throw err;
-        }
-      });
-
-    void this.refreshEnabledCache();
-  }
-
-  private async refreshEnabledCache(): Promise<void> {
-    try {
-      const device = await this.client.getDevice(this.serial);
-      const value = device.getProperty('enabled');
-      if (typeof value === 'boolean') {
-        this.enabledCache = value;
-        this.switchService?.updateCharacteristic(
-          this.Characteristic.On,
-          value,
-        );
-      }
-    } catch {
-      // keep last cache
-    }
+    this.motionService
+      .getCharacteristic(this.Characteristic.MotionDetected)
+      .onGet(() => false);
   }
 
   private setupCameraStreaming(): void {
@@ -132,18 +99,17 @@ export abstract class BaseCameraAccessory {
     );
 
     this.cameraController = new hap.CameraController({
-      cameraStreamCount: 2,
+      cameraStreamCount: 1,
       delegate: this.streaming,
       streamingOptions: {
         supportedCryptoSuites: [hap.SRTPCryptoSuites.AES_CM_128_HMAC_SHA1_80],
         video: {
           resolutions: [
-            [320, 180, 30],
             [320, 240, 15],
+            [320, 180, 30],
             [480, 270, 30],
             [640, 360, 30],
             [1280, 720, 30],
-            [1920, 1080, 30],
           ],
           codec: {
             profiles: [
@@ -173,6 +139,7 @@ export abstract class BaseCameraAccessory {
     this.streaming.setController(this.cameraController);
     this.accessory.configureController(this.cameraController);
     this.log.info(`HomeKit camera enabled for ${this.displayName} (${this.serial})`);
+    // Only pull a retained push thumbnail — never open P2P just because Home restored the tile.
     void this.streaming.prefetchSnapshot();
   }
 

@@ -22,10 +22,7 @@ export class DoorbellAccessory extends BaseCameraAccessory {
       this.Service.Doorbell,
       accessory.displayName,
     );
-    // Event-only characteristic — must not invent a press on every HomeKit poll.
-    this.doorbellService
-      .getCharacteristic(this.Characteristic.ProgrammableSwitchEvent)
-      .onGet(() => null);
+    // Event-only: do not register onGet (returning values confuses Home / can stall reads).
   }
 
   ring(): void {

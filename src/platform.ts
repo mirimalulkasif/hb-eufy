@@ -139,6 +139,26 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
     }
   }
 
+  private async loadDevices(timeoutMs: number): Promise<Device[]> {
+    if (!this.client) {
+      return [];
+    }
+    try {
+      return await Promise.race([
+        this.client.getDevices(),
+        new Promise<Device[]>((_, reject) => {
+          setTimeout(
+            () => reject(new Error(`getDevices timed out after ${timeoutMs / 1000}s`)),
+            timeoutMs,
+          );
+        }),
+      ]);
+    } catch (err) {
+      this.log.warn(String(err));
+      return [];
+    }
+  }
+
   private bindClientEvents(client: EufySecurity): void {
     client.on('device added', (device) => {
       void this.upsertDevice(device);
@@ -195,9 +215,33 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
     if (!this.client) {
       return;
     }
-    const devices = await this.client.getDevices();
+
+    this.log.info('Loading devices from Eufy cloud…');
+    try {
+      await this.client.refreshCloudData();
+    } catch (err) {
+      this.log.warn(`Cloud refresh warning: ${String(err)}`);
+    }
+
+    // First attempt — eufy-security-client can hang forever on devicesLoaded.
+    let devices = await this.loadDevices(45_000);
+    if (devices.length === 0) {
+      this.log.warn(
+        'No devices yet (or load timed out). Waiting 15s for device events…',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 15_000));
+      devices = await this.loadDevices(10_000);
+    }
+
+    this.log.info(`Cloud returned ${devices.length} device(s).`);
     const seen = new Set<string>();
     for (const device of devices) {
+      const type = device.getDeviceType();
+      const kind = classifyDevice(device);
+      this.log.info(
+        `Found "${device.getName()}" sn=${device.getSerial()} ` +
+          `type=${type} model=${device.getModel() || '?'} → ${kind ?? 'skipped'}`,
+      );
       const serial = device.getSerial();
       if (this.upsertDevice(device)) {
         seen.add(serial);
@@ -217,11 +261,20 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
     this.log.info(
       `Eufy Cameras ready — ${this.handlers.size} doorbell/indoor device(s).`,
     );
+    if (this.handlers.size === 0) {
+      this.log.warn(
+        'No doorbell/indoor cameras matched. Check the "Found … → skipped" lines above for device types, ' +
+          'confirm the Eufy account owns those cameras, and try acceptInvitations / MFA if needed.',
+      );
+    }
   }
 
   private upsertDevice(device: Device): boolean {
     const kind = classifyDevice(device);
     if (!kind) {
+      this.log.debug(
+        `Skipping non doorbell/indoor device ${device.getName()} type=${device.getDeviceType()}`,
+      );
       return false;
     }
 

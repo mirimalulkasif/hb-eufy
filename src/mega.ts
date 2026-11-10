@@ -22,6 +22,8 @@ export type MegaLoginConfig = {
   password: string;
   countryCode: string;
   persistDir: string;
+  /** Absolute path to Homebridge config.json (optional). Polled for mfaCode/captchaCode. */
+  configPath?: string;
 };
 
 const MFA_FILE = 'mfa-code.txt';
@@ -29,6 +31,7 @@ const CAPTCHA_FILE = 'captcha-code.txt';
 const CAPTCHA_IMAGE = 'captcha.png';
 const CODE_WAIT_MS = 5 * 60 * 1000;
 const CODE_POLL_MS = 2000;
+const PROGRESS_EVERY_MS = 15_000;
 
 function readCodeFile(filePath: string): string | undefined {
   try {
@@ -52,44 +55,113 @@ function clearCodeFile(filePath: string): void {
   }
 }
 
+function readCodeFromHomebridgeConfig(
+  configPath: string | undefined,
+  field: 'mfaCode' | 'captchaCode',
+): string | undefined {
+  if (!configPath || !fs.existsSync(configPath)) {
+    return undefined;
+  }
+  try {
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8')) as {
+      platforms?: Array<Record<string, unknown>>;
+    };
+    for (const platform of raw.platforms || []) {
+      if (platform.platform !== 'EufyCameras') {
+        continue;
+      }
+      const value = platform[field];
+      if (typeof value === 'string' && value.trim()) {
+        return value.trim();
+      }
+    }
+  } catch {
+    // ignore parse errors while the UI is writing the file
+  }
+  return undefined;
+}
+
+type WaitOptions = {
+  log: Logging;
+  filePath: string;
+  label: string;
+  timeoutMs: number;
+  configPath?: string;
+  configField?: 'mfaCode' | 'captchaCode';
+  /** Codes already tried (rejected) — ignore until something new appears. */
+  rejectCodes?: Set<string>;
+};
+
 /**
- * Wait for the user to drop a one-time code into a file.
- * Do NOT restart Homebridge — a restart requests a new code and invalidates this one.
+ * Wait for a one-time code without restarting Homebridge.
+ * Prefer the persist file. Config is also polled, but saving config in the UI
+ * restarts the child bridge and requests a NEW code — that path is discouraged.
  */
-async function waitForCodeFile(
-  log: Logging,
-  filePath: string,
-  label: string,
-  timeoutMs: number,
-): Promise<string> {
-  clearCodeFile(filePath);
+async function waitForCode(opts: WaitOptions): Promise<string> {
+  const {
+    log,
+    filePath,
+    label,
+    timeoutMs,
+    configPath,
+    configField,
+    rejectCodes = new Set(),
+  } = opts;
+
   const deadline = Date.now() + timeoutMs;
+  let nextProgressAt = Date.now() + PROGRESS_EVERY_MS;
+  let attempt = 0;
+
   log.warn(
-    `${label} required. Do NOT restart Homebridge.\n` +
-      `  1) Wait for the code (email/SMS or captcha image).\n` +
-      `  2) Write it to this file (one line):\n` +
+    `${label} required. Do NOT restart Homebridge and do NOT save the plugin config in the UI ` +
+      `(that restarts the bridge and requests a new code).\n` +
+      `  Write the code to this file (one line):\n` +
       `     ${filePath}\n` +
-      `  Example: echo '123456' > "${filePath}"\n` +
-      `Waiting up to ${Math.round(timeoutMs / 60000)} minutes…`,
+      `  Example: echo '123456' > "${filePath}"`,
   );
 
   while (Date.now() < deadline) {
-    const code = readCodeFile(filePath);
-    if (code) {
-      clearCodeFile(filePath);
-      log.info(`${label} code received from ${path.basename(filePath)}.`);
+    attempt += 1;
+    const fromFile = readCodeFile(filePath);
+    const fromConfig =
+      configField && configPath
+        ? readCodeFromHomebridgeConfig(configPath, configField)
+        : undefined;
+    const code = fromFile || fromConfig;
+
+    if (code && !rejectCodes.has(code)) {
+      if (fromFile) {
+        clearCodeFile(filePath);
+        log.info(`${label} code received from ${path.basename(filePath)}.`);
+      } else {
+        log.info(
+          `${label} code read from config.json (${configField}). ` +
+            'Prefer the mfa-code.txt file next time to avoid UI restarts.',
+        );
+      }
       return code;
     }
+
+    if (Date.now() >= nextProgressAt) {
+      const leftSec = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      log.info(
+        `Still waiting for ${label}… check #${attempt}, ${leftSec}s left. ` +
+          `File: ${filePath}`,
+      );
+      nextProgressAt = Date.now() + PROGRESS_EVERY_MS;
+    }
+
     await new Promise((resolve) => setTimeout(resolve, CODE_POLL_MS));
   }
+
   throw new Error(
-    `${label} timed out waiting for ${filePath}. Restart the plugin to request a new code.`,
+    `${label} timed out after ${Math.round(timeoutMs / 1000)}s waiting for ${filePath}.`,
   );
 }
 
 /**
  * Login to Eufy Mega (v6).
- * Captcha / 2FA are completed via files in persistDir so you do not restart mid-challenge.
+ * Captcha / 2FA are completed via persist files (and optionally config) while the process stays up.
  */
 export async function loginMega(
   log: Logging,
@@ -112,9 +184,10 @@ export async function loginMega(
 
   let result = await client.login();
   const { LoginStatus } = sdk;
+  const rejectedMfa = new Set<string>();
+  const rejectedCaptcha = new Set<string>();
 
-  // Allow a few challenge steps (captcha then 2FA, or retries).
-  for (let step = 0; step < 4; step++) {
+  for (let step = 0; step < 6; step++) {
     if (result.status === LoginStatus.Ok) {
       break;
     }
@@ -129,20 +202,42 @@ export async function loginMega(
       } catch (err) {
         log.warn(`Could not write captcha image: ${String(err)}`);
       }
-      const answer = await waitForCodeFile(
+      const answer = await waitForCode({
         log,
-        captchaCodePath,
-        'Captcha',
-        CODE_WAIT_MS,
-      );
+        filePath: captchaCodePath,
+        label: 'Captcha',
+        timeoutMs: CODE_WAIT_MS,
+        configPath: cfg.configPath,
+        configField: 'captchaCode',
+        rejectCodes: rejectedCaptcha,
+      });
       result = await client.solveCaptcha(answer);
+      if (result.status === LoginStatus.Captcha) {
+        rejectedCaptcha.add(answer);
+        log.warn('Captcha was rejected — waiting for a new answer.');
+      }
       continue;
     }
 
     if (result.status === LoginStatus.TwoFactor) {
       log.warn(`Eufy 2FA required (method=${result.method}).`);
-      const code = await waitForCodeFile(log, mfaPath, '2FA', CODE_WAIT_MS);
+      const code = await waitForCode({
+        log,
+        filePath: mfaPath,
+        label: '2FA',
+        timeoutMs: CODE_WAIT_MS,
+        configPath: cfg.configPath,
+        configField: 'mfaCode',
+        rejectCodes: rejectedMfa,
+      });
       result = await client.submitVerifyCode(code);
+      if (result.status === LoginStatus.TwoFactor) {
+        rejectedMfa.add(code);
+        log.warn(
+          '2FA code was rejected (wrong/expired, or a new code was issued). ' +
+            'Waiting for a fresh code in mfa-code.txt — do not restart.',
+        );
+      }
       continue;
     }
 

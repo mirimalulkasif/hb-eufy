@@ -42,21 +42,23 @@ Or Homebridge UI → Plugins → `homebridge-eufy-cameras`.
 
 `country` must match the region in the Eufy mobile app.
 
-### MFA / captcha (do not restart)
+### MFA / captcha (do not restart, do not save config)
 
-Restarting Homebridge requests a **new** code and invalidates the one you just received.
+Restarting Homebridge **or saving the plugin config in the UI** requests a **new** code and invalidates the one you just received.
 
-When the logs say 2FA/captcha is required, keep Homebridge running and write the code to a file under the plugin persist folder (`…/eufy-cameras/`):
+When the logs say 2FA/captcha is required, keep the process running and write the code to a file:
 
 ```bash
-# 2FA (email/SMS code)
-echo '123456' > /path/to/homebridge/eufy-cameras/mfa-code.txt
+# 2FA — use the path printed in the log (often under /var/lib/homebridge/)
+echo '123456' > /var/lib/homebridge/eufy-cameras/mfa-code.txt
 
 # Captcha (after opening captcha.png in that same folder)
-echo 'AB12' > /path/to/homebridge/eufy-cameras/captcha-code.txt
+echo 'AB12' > /var/lib/homebridge/eufy-cameras/captcha-code.txt
 ```
 
-The plugin polls those files for a few minutes, completes login, and saves the session so the next start usually needs no code.
+The plugin polls every few seconds and logs progress (`Still waiting for 2FA… check #N, Xs left`). After success the session is saved, so later starts usually need no code.
+
+Also requires **Node.js ≥ 24.5** (Mega SDK).
 
 ## Notes
 

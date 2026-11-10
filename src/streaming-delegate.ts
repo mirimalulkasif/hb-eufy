@@ -90,12 +90,10 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     request: SnapshotRequest,
     callback: SnapshotRequestCallback,
   ): void {
-    void this.takeSnapshot(request.width, request.height)
-      .then((image) => callback(undefined, image))
-      .catch((err) => {
-        this.log.debug(`Snapshot failed: ${String(err)}`);
-        callback(undefined, this.cachedSnapshot ?? placeholderJpeg());
-      });
+    // Answer HomeKit immediately. Slow P2P/live grabs run in the background and
+    // only update the cache — waiting here makes the tile show "No Response".
+    callback(undefined, this.cachedSnapshot ?? placeholderJpeg());
+    void this.refreshSnapshotCache(request.width, request.height);
   }
 
   prepareStream(
@@ -127,41 +125,60 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     }
   }
 
-  private async takeSnapshot(width: number, height: number): Promise<Buffer> {
-    // Prefer a cached push thumbnail — avoids opening P2P just for HomeKit tile refresh.
+  private refreshInFlight?: Promise<void>;
+
+  /** Best-effort cache fill; never used on the HomeKit snapshot callback path. */
+  async prefetchSnapshot(): Promise<void> {
+    await this.refreshSnapshotCache(640, 360);
+  }
+
+  private async refreshSnapshotCache(
+    width: number,
+    height: number,
+  ): Promise<void> {
+    if (this.refreshInFlight) {
+      return this.refreshInFlight;
+    }
+    this.refreshInFlight = this.doRefreshSnapshot(width, height).finally(() => {
+      this.refreshInFlight = undefined;
+    });
+    return this.refreshInFlight;
+  }
+
+  private async doRefreshSnapshot(
+    width: number,
+    height: number,
+  ): Promise<void> {
     try {
       const device = await this.client.getDevice(this.serial);
       const cam = device.camera?.();
       const stored = await cam?.snapshotStored?.();
       if (stored && stored.length > 100) {
         this.cachedSnapshot = stored;
-        return stored;
+        return;
       }
     } catch (err) {
       this.log.debug(`Stored snapshot unavailable: ${String(err)}`);
     }
 
-    if (this.cachedSnapshot) {
-      return this.cachedSnapshot;
+    // Only attempt a live grab when we still have nothing useful cached.
+    if (this.cachedSnapshot && this.cachedSnapshot.length > 100) {
+      return;
     }
 
-    // Live JPEG / remux can take a full P2P connect — bound it so HomeKit does not hang.
     try {
       const jpeg = await Promise.race([
         this.grabLiveSnapshot(width, height),
         new Promise<undefined>((resolve) =>
-          setTimeout(() => resolve(undefined), 12_000),
+          setTimeout(() => resolve(undefined), 20_000),
         ),
       ]);
       if (jpeg?.length) {
         this.cachedSnapshot = jpeg;
-        return jpeg;
       }
     } catch (err) {
       this.log.debug(`Live snapshot unavailable: ${String(err)}`);
     }
-
-    return placeholderJpeg();
   }
 
   private async grabLiveSnapshot(
@@ -256,24 +273,37 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     this.ongoing.set(request.sessionID, active);
     this.pending.delete(request.sessionID);
 
+    let callbackFired = false;
+    const safeCallback = (err?: Error) => {
+      if (callbackFired) return;
+      callbackFired = true;
+      callback(err);
+    };
+
     try {
+      this.log.info(
+        `HomeKit requested live stream for ${this.displayName} (${this.serial})`,
+      );
       active.socket = this.bindReturnSocket(sessionInfo, request);
-      const stream = await this.livestream.getStream();
+
+      const stream = await Promise.race([
+        this.livestream.getStream(),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `P2P connect timed out opening livestream for ${this.serial}`,
+                ),
+              ),
+            25_000,
+          ),
+        ),
+      ]);
       const videoPort = await serveReadableOnce(stream.videostream);
       const v = request.video;
-      const profile =
-        v.profile === this.hap.H264Profile.HIGH
-          ? 'high'
-          : v.profile === this.hap.H264Profile.MAIN
-            ? 'main'
-            : 'baseline';
-      const level =
-        v.level === this.hap.H264Level.LEVEL4_0
-          ? '4.0'
-          : v.level === this.hap.H264Level.LEVEL3_2
-            ? '3.2'
-            : '3.1';
 
+      // Prefer bitstream copy on ARM — libx264 re-encode is too heavy for 32-bit Pis.
       const videoArgs = [
         '-hide_banner',
         '-loglevel',
@@ -282,33 +312,11 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         '1',
         '-f',
         'h264',
-        '-r',
-        String(v.fps),
         '-i',
         `tcp://127.0.0.1:${videoPort}`,
         '-an',
         '-c:v',
-        'libx264',
-        '-pix_fmt',
-        'yuv420p',
-        '-color_range',
-        'mpeg',
-        '-profile:v',
-        profile,
-        '-level:v',
-        level,
-        '-preset',
-        'ultrafast',
-        '-tune',
-        'zerolatency',
-        '-vf',
-        `scale=${v.width}:${v.height}:force_original_aspect_ratio=decrease,pad=${v.width}:${v.height}:(ow-iw)/2:(oh-ih)/2`,
-        '-b:v',
-        `${v.max_bit_rate}k`,
-        '-bufsize',
-        `${v.max_bit_rate * 2}k`,
-        '-maxrate',
-        `${v.max_bit_rate}k`,
+        'copy',
         '-payload_type',
         String(v.pt),
         '-ssrc',
@@ -322,19 +330,12 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         `srtp://${sessionInfo.address}:${sessionInfo.videoPort}?rtcpport=${sessionInfo.videoPort}&pkt_size=1128`,
       ];
 
-      let callbackFired = false;
-      const safeCallback = (err?: Error) => {
-        if (callbackFired) return;
-        callbackFired = true;
-        callback(err);
-      };
-
       active.video = startFfmpeg(
         this.ffmpegPath,
         videoArgs,
         () => {
           this.log.info(
-            `Streaming ${this.displayName} ${v.width}x${v.height} @ ${v.fps}fps`,
+            `Streaming ${this.displayName} (copy) toward ${v.width}x${v.height}@${v.fps}`,
           );
           safeCallback();
         },
@@ -344,10 +345,20 @@ export class StreamingDelegate implements CameraStreamingDelegate {
           safeCallback(err);
         },
       );
+
+      // If ffmpeg never signals start, fail the HomeKit session instead of hanging forever.
+      setTimeout(() => {
+        if (!callbackFired) {
+          const err = new Error('ffmpeg did not start streaming in time');
+          this.log.error(err.message);
+          this.stopStream(request.sessionID);
+          safeCallback(err);
+        }
+      }, 15_000);
     } catch (err) {
       this.log.error(`Failed to start stream: ${String(err)}`);
       this.stopStream(request.sessionID);
-      callback(err as Error);
+      safeCallback(err as Error);
     }
   }
 

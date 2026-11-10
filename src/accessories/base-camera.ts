@@ -76,29 +76,23 @@ export abstract class BaseCameraAccessory {
     );
   }
 
+  private enabledCache = true;
+
   private setupEnableSwitch(): void {
     this.switchService = this.getOrAddService(
       this.Service.Switch,
       `${this.accessory.displayName} Enabled`,
       'enabled',
     );
+    // Never await cloud/P2P inside onGet — HomeKit marks the accessory "No Response".
     this.switchService
       .getCharacteristic(this.Characteristic.On)
-      .onGet(async () => {
-        try {
-          const device = await this.client.getDevice(this.serial);
-          const value = device.getProperty('enabled');
-          if (typeof value === 'boolean') {
-            return value;
-          }
-          return true;
-        } catch {
-          return true;
-        }
-      })
+      .onGet(() => this.enabledCache)
       .onSet(async (value) => {
+        const next = Boolean(value);
+        this.enabledCache = next;
         try {
-          await this.client.setProperty(this.serial, 'enabled', Boolean(value));
+          await this.client.setProperty(this.serial, 'enabled', next);
         } catch (err) {
           this.log.error(
             `Failed to set enabled on ${this.serial}: ${String(err)}`,
@@ -106,6 +100,24 @@ export abstract class BaseCameraAccessory {
           throw err;
         }
       });
+
+    void this.refreshEnabledCache();
+  }
+
+  private async refreshEnabledCache(): Promise<void> {
+    try {
+      const device = await this.client.getDevice(this.serial);
+      const value = device.getProperty('enabled');
+      if (typeof value === 'boolean') {
+        this.enabledCache = value;
+        this.switchService?.updateCharacteristic(
+          this.Characteristic.On,
+          value,
+        );
+      }
+    } catch {
+      // keep last cache
+    }
   }
 
   private setupCameraStreaming(): void {
@@ -161,6 +173,7 @@ export abstract class BaseCameraAccessory {
     this.streaming.setController(this.cameraController);
     this.accessory.configureController(this.cameraController);
     this.log.info(`HomeKit camera enabled for ${this.displayName} (${this.serial})`);
+    void this.streaming.prefetchSnapshot();
   }
 
   updateMeta(name: string, model: string): void {

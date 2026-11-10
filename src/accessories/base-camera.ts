@@ -6,11 +6,10 @@ import type {
   Service,
   WithUUID,
 } from 'homebridge';
-import type { Device } from 'eufy-security-client';
-import { PropertyName } from 'eufy-security-client';
 
 import type { EufyCamerasPlatform } from '../platform';
 import type { EufyKind } from '../device-kinds';
+import type { EufyMega } from '../mega';
 import { StreamingDelegate } from '../streaming-delegate';
 
 export abstract class BaseCameraAccessory {
@@ -26,8 +25,11 @@ export abstract class BaseCameraAccessory {
     protected readonly platform: EufyCamerasPlatform,
     protected readonly accessory: PlatformAccessory,
     protected readonly log: Logging,
-    protected device: Device,
+    protected readonly client: EufyMega,
+    protected readonly serial: string,
     protected readonly kind: EufyKind,
+    protected displayName: string,
+    protected model: string,
   ) {
     this.Service = platform.Service;
     this.Characteristic = platform.Characteristic;
@@ -36,12 +38,9 @@ export abstract class BaseCameraAccessory {
       || this.accessory.addService(this.Service.AccessoryInformation);
     info
       .setCharacteristic(this.Characteristic.Manufacturer, 'Eufy')
-      .setCharacteristic(this.Characteristic.Model, device.getModel() || kind)
-      .setCharacteristic(this.Characteristic.SerialNumber, device.getSerial())
-      .setCharacteristic(
-        this.Characteristic.FirmwareRevision,
-        String(device.getSoftwareVersion() || '1.0.0'),
-      );
+      .setCharacteristic(this.Characteristic.Model, model || kind)
+      .setCharacteristic(this.Characteristic.SerialNumber, serial)
+      .setCharacteristic(this.Characteristic.FirmwareRevision, '2.0.0');
 
     this.setupMotion();
     this.setupEnableSwitch();
@@ -83,37 +82,41 @@ export abstract class BaseCameraAccessory {
       `${this.accessory.displayName} Enabled`,
       'enabled',
     );
-    const enabled = Boolean(this.device.getPropertyValue(PropertyName.DeviceEnabled));
     this.switchService
       .getCharacteristic(this.Characteristic.On)
-      .onGet(() => Boolean(this.device.getPropertyValue(PropertyName.DeviceEnabled)))
+      .onGet(async () => {
+        try {
+          const device = await this.client.getDevice(this.serial);
+          const value = device.getProperty('enabled');
+          if (typeof value === 'boolean') {
+            return value;
+          }
+          return true;
+        } catch {
+          return true;
+        }
+      })
       .onSet(async (value) => {
         try {
-          await this.platform.setDeviceEnabled(this.device, Boolean(value));
+          await this.client.setProperty(this.serial, 'enabled', Boolean(value));
         } catch (err) {
           this.log.error(
-            `Failed to set enabled on ${this.device.getSerial()}: ${String(err)}`,
+            `Failed to set enabled on ${this.serial}: ${String(err)}`,
           );
           throw err;
         }
       });
-    this.switchService.updateCharacteristic(this.Characteristic.On, enabled);
   }
 
   private setupCameraStreaming(): void {
-    if (!this.platform.client) {
-      this.log.warn(
-        `Skipping HomeKit camera for ${this.device.getSerial()} — client not ready`,
-      );
-      return;
-    }
-
     const hap = this.platform.api.hap;
     this.streaming = new StreamingDelegate(
       this.platform,
       this.platform.api,
       this.log,
-      this.device,
+      this.client,
+      this.serial,
+      this.displayName,
     );
 
     this.cameraController = new hap.CameraController({
@@ -150,10 +153,6 @@ export abstract class BaseCameraAccessory {
               type: hap.AudioStreamingCodecType.AAC_ELD,
               samplerate: hap.AudioStreamingSamplerate.KHZ_16,
             },
-            {
-              type: hap.AudioStreamingCodecType.OPUS,
-              samplerate: hap.AudioStreamingSamplerate.KHZ_24,
-            },
           ],
         },
       },
@@ -161,19 +160,13 @@ export abstract class BaseCameraAccessory {
 
     this.streaming.setController(this.cameraController);
     this.accessory.configureController(this.cameraController);
-    this.log.info(
-      `HomeKit camera enabled for ${this.device.getName()} (${this.device.getSerial()})`,
-    );
+    this.log.info(`HomeKit camera enabled for ${this.displayName} (${this.serial})`);
   }
 
-  updateDevice(device: Device): void {
-    this.device = device;
-    if (this.switchService) {
-      this.switchService.updateCharacteristic(
-        this.Characteristic.On,
-        Boolean(device.getPropertyValue(PropertyName.DeviceEnabled)),
-      );
-    }
+  updateMeta(name: string, model: string): void {
+    this.displayName = name;
+    this.model = model;
+    this.accessory.displayName = name;
   }
 
   triggerMotion(active = true): void {
@@ -197,6 +190,4 @@ export abstract class BaseCameraAccessory {
       }, hold);
     }
   }
-
-  abstract handlePush(eventType: number): void;
 }

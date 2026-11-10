@@ -26,21 +26,15 @@
         "title": "Country code",
         "type": "string",
         "default": "US",
-        "description": "Must match the country/region selected in the Eufy mobile app for this account (e.g. IL, US, DE). Wrong country often yields 0 devices.",
+        "description": "Must match the country/region in the Eufy app (e.g. IL, US, DE).",
         "required": true
       },
-      "trustedDeviceName": {
-        "title": "Trusted device name",
-        "type": "string",
-        "default": "Homebridge",
-        "description": "Name shown in the Eufy app for this connection."
-      },
       "pollingIntervalMinutes": {
-        "title": "Cloud polling interval (minutes)",
+        "title": "Device refresh interval (minutes)",
         "type": "integer",
         "default": 10,
         "minimum": 1,
-        "description": "How often to refresh the device list after cameras are found. When none are found yet, the plugin retries every 60 seconds."
+        "description": "How often to refresh after cameras are found. While empty, retries every 60 seconds."
       },
       "eventDurationSeconds": {
         "title": "Motion hold time (seconds)",
@@ -51,28 +45,17 @@
       "mfaCode": {
         "title": "MFA / 2FA code",
         "type": "string",
-        "description": "Only needed when Eufy asks for a one-time login code. Clear after a successful connect."
-      },
-      "captchaId": {
-        "title": "Captcha id",
-        "type": "string",
-        "description": "From Homebridge logs when a captcha is requested."
+        "description": "Only when Eufy emails/SMS a login code. Clear after a successful connect."
       },
       "captchaCode": {
-        "title": "Captcha code",
+        "title": "Captcha answer",
         "type": "string",
-        "description": "Solution for the captcha challenge."
-      },
-      "acceptInvitations": {
-        "title": "Accept shared-device invitations",
-        "type": "boolean",
-        "default": true,
-        "description": "Keep enabled if cameras are shared to this Eufy account from another owner."
+        "description": "4-character answer from captcha.png in the plugin persist folder. Clear after success."
       },
       "ffmpegPath": {
         "title": "Custom ffmpeg path",
         "type": "string",
-        "description": "Optional. Defaults to the bundled ffmpeg-for-homebridge binary, then system ffmpeg."
+        "description": "Optional. Defaults to ffmpeg-for-homebridge, then system ffmpeg."
       }
     }
   }

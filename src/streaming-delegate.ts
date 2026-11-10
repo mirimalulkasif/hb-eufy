@@ -3,7 +3,6 @@ import os from 'node:os';
 
 import type {
   API,
-  AudioStreamingCodecType,
   CameraController,
   CameraStreamingDelegate,
   HAP,
@@ -19,8 +18,6 @@ import type {
 import { StreamRequestTypes } from 'homebridge';
 import { pickPort } from 'pick-port';
 
-import type { Device } from 'eufy-security-client';
-
 import {
   grabJpegFromStream,
   placeholderJpeg,
@@ -30,6 +27,7 @@ import {
   type FfmpegHandle,
 } from './ffmpeg';
 import { LivestreamManager } from './livestream-manager';
+import type { EufyMega } from './mega';
 import type { EufyCamerasPlatform } from './platform';
 
 type SessionInfo = {
@@ -47,7 +45,6 @@ type SessionInfo = {
 
 type ActiveSession = {
   video?: FfmpegHandle;
-  audio?: FfmpegHandle;
   socket?: Socket;
   timeout?: NodeJS.Timeout;
 };
@@ -65,7 +62,9 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     private readonly platform: EufyCamerasPlatform,
     private readonly api: API,
     private readonly log: Logging,
-    private readonly device: Device,
+    private readonly client: EufyMega,
+    private readonly serial: string,
+    private readonly displayName: string,
   ) {
     this.hap = api.hap;
     this.ffmpegPath = resolveFfmpegPath(
@@ -73,14 +72,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         ? platform.config.ffmpegPath
         : undefined,
     );
-    if (!platform.client) {
-      throw new Error('Eufy client not ready');
-    }
-    this.livestream = new LivestreamManager(
-      platform.client,
-      device.getSerial(),
-      log,
-    );
+    this.livestream = new LivestreamManager(client, serial, log);
   }
 
   setController(controller: CameraController): void {
@@ -136,6 +128,23 @@ export class StreamingDelegate implements CameraStreamingDelegate {
   }
 
   private async takeSnapshot(width: number, height: number): Promise<Buffer> {
+    try {
+      const device = await this.client.getDevice(this.serial);
+      const cam = device.camera?.();
+      const stored = await cam?.snapshotStored?.();
+      if (stored && stored.length > 100) {
+        this.cachedSnapshot = stored;
+        return stored;
+      }
+      const live = await cam?.snapshotLive?.();
+      if (live?.jpeg?.length) {
+        this.cachedSnapshot = live.jpeg;
+        return live.jpeg;
+      }
+    } catch (err) {
+      this.log.debug(`Native snapshot unavailable: ${String(err)}`);
+    }
+
     const stream = await this.livestream.getStream();
     try {
       const jpeg = await grabJpegFromStream(
@@ -156,9 +165,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     const audioReturnPort = await pickPort({ type: 'udp' });
     const videoSSRC = this.hap.CameraController.generateSynchronisationSource();
     const audioSSRC = this.hap.CameraController.generateSynchronisationSource();
-
     const ipv6 = request.addressVersion === 'ipv6';
-    const localAddress = this.pickLocalAddress(ipv6);
 
     const session: SessionInfo = {
       address: request.targetAddress,
@@ -175,7 +182,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     this.pending.set(request.sessionID, session);
 
     return {
-      address: localAddress,
+      address: this.pickLocalAddress(ipv6),
       video: {
         port: videoReturnPort,
         ssrc: videoSSRC,
@@ -222,7 +229,6 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       active.socket = this.bindReturnSocket(sessionInfo, request);
       const stream = await this.livestream.getStream();
       const videoPort = await serveReadableOnce(stream.videostream);
-
       const v = request.video;
       const profile =
         v.profile === this.hap.H264Profile.HIGH
@@ -297,7 +303,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         videoArgs,
         () => {
           this.log.info(
-            `Streaming ${this.device.getName()} ${v.width}x${v.height} @ ${v.fps}fps`,
+            `Streaming ${this.displayName} ${v.width}x${v.height} @ ${v.fps}fps`,
           );
           safeCallback();
         },
@@ -307,72 +313,10 @@ export class StreamingDelegate implements CameraStreamingDelegate {
           safeCallback(err);
         },
       );
-
-      // Best-effort audio (separate process so stalled audio never blocks video).
-      void this.startAudio(request, sessionInfo, stream.audiostream, active);
     } catch (err) {
       this.log.error(`Failed to start stream: ${String(err)}`);
       this.stopStream(request.sessionID);
       callback(err as Error);
-    }
-  }
-
-  private async startAudio(
-    request: StartStreamRequest,
-    sessionInfo: SessionInfo,
-    audiostream: import('node:stream').Readable,
-    active: ActiveSession,
-  ): Promise<void> {
-    try {
-      const codec = request.audio.codec as AudioStreamingCodecType;
-      const aac =
-        codec === this.hap.AudioStreamingCodecType.OPUS
-          ? { encoder: 'libopus', opts: ['-application', 'lowdelay'] }
-          : { encoder: 'libfdk_aac', opts: ['-profile:a', 'aac_eld'] };
-
-      const audioPort = await serveReadableOnce(audiostream);
-      const args = [
-        '-hide_banner',
-        '-loglevel',
-        'error',
-        '-f',
-        'aac',
-        '-i',
-        `tcp://127.0.0.1:${audioPort}`,
-        '-vn',
-        '-c:a',
-        aac.encoder,
-        ...aac.opts,
-        '-ac',
-        String(request.audio.channel),
-        '-ar',
-        String(request.audio.sample_rate * 1000),
-        '-b:a',
-        `${request.audio.max_bit_rate}k`,
-        '-payload_type',
-        String(request.audio.pt),
-        '-ssrc',
-        String(sessionInfo.audioSSRC),
-        '-f',
-        'rtp',
-        '-srtp_out_suite',
-        'AES_CM_128_HMAC_SHA1_80',
-        '-srtp_out_params',
-        sessionInfo.audioSRTP.toString('base64'),
-        `srtp://${sessionInfo.address}:${sessionInfo.audioPort}?rtcpport=${sessionInfo.audioPort}&pkt_size=188`,
-      ];
-
-      active.audio = startFfmpeg(
-        this.ffmpegPath,
-        args,
-        () => this.log.debug(`Audio streaming for ${this.device.getSerial()}`),
-        (err) => {
-          this.log.debug(`Audio ffmpeg ended: ${err.message}`);
-          active.audio = undefined;
-        },
-      );
-    } catch (err) {
-      this.log.debug(`Audio stream skipped: ${String(err)}`);
     }
   }
 
@@ -407,7 +351,6 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     }
     if (active.timeout) clearTimeout(active.timeout);
     active.video?.stop();
-    active.audio?.stop();
     try {
       active.socket?.close();
     } catch {

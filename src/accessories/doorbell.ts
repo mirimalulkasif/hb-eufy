@@ -1,12 +1,8 @@
 import type { Logging, PlatformAccessory, Service } from 'homebridge';
-import type { Device } from 'eufy-security-client';
 
 import { BaseCameraAccessory } from './base-camera';
 import type { EufyCamerasPlatform } from '../platform';
-
-/** Eufy push / P2P event codes commonly used for doorbell products. */
-const PRESS_DOORBELL = 3103;
-const MOTION_DETECTION = 3101;
+import type { EufyMega } from '../mega';
 
 export class DoorbellAccessory extends BaseCameraAccessory {
   private doorbellService: Service;
@@ -15,9 +11,12 @@ export class DoorbellAccessory extends BaseCameraAccessory {
     platform: EufyCamerasPlatform,
     accessory: PlatformAccessory,
     log: Logging,
-    device: Device,
+    client: EufyMega,
+    serial: string,
+    displayName: string,
+    model: string,
   ) {
-    super(platform, accessory, log, device, 'doorbell');
+    super(platform, accessory, log, client, serial, 'doorbell', displayName, model);
 
     this.doorbellService = this.getOrAddService(
       this.Service.Doorbell,
@@ -34,16 +33,6 @@ export class DoorbellAccessory extends BaseCameraAccessory {
       this.Characteristic.ProgrammableSwitchEvent.SINGLE_PRESS,
     );
     this.triggerMotion(true);
-    this.log.info(`Doorbell ring: ${this.device.getName()} (${this.device.getSerial()})`);
-  }
-
-  handlePush(eventType: number): void {
-    if (eventType === PRESS_DOORBELL) {
-      this.ring();
-      return;
-    }
-    if (eventType === MOTION_DETECTION) {
-      this.triggerMotion(true);
-    }
+    this.log.info(`Doorbell ring: ${this.displayName} (${this.serial})`);
   }
 }

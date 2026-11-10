@@ -1,5 +1,7 @@
 import { createSocket, type Socket } from 'node:dgram';
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 
 import type {
   API,
@@ -29,6 +31,7 @@ import type { EufyKind } from './device-kinds';
 import { LivestreamManager } from './livestream-manager';
 import type { EufyMega } from './mega';
 import type { EufyCamerasPlatform } from './platform';
+import { streamModeFor, type StreamMode } from './stream-mode';
 
 type SessionInfo = {
   address: string;
@@ -47,16 +50,20 @@ type ActiveSession = {
   video?: FfmpegHandle;
   socket?: Socket;
   timeout?: NodeJS.Timeout;
+  stillPath?: string;
+  stillRefresh?: NodeJS.Timeout;
 };
 
 export class StreamingDelegate implements CameraStreamingDelegate {
   private readonly hap: HAP;
   private readonly ffmpegPath: string;
   private readonly livestream: LivestreamManager;
+  private readonly mode: StreamMode;
   private controller?: CameraController;
   private readonly pending = new Map<string, SessionInfo>();
   private readonly ongoing = new Map<string, ActiveSession>();
   private cachedSnapshot?: Buffer;
+  private refreshInFlight?: Promise<void>;
 
   constructor(
     private readonly platform: EufyCamerasPlatform,
@@ -69,6 +76,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     model: string,
   ) {
     this.hap = api.hap;
+    this.mode = streamModeFor(kind, model);
     this.ffmpegPath = resolveFfmpegPath(
       typeof platform.config.ffmpegPath === 'string'
         ? platform.config.ffmpegPath
@@ -79,14 +87,52 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       model,
       lingerMs: 90_000,
     });
+    if (this.mode === 'stills') {
+      this.log.info(
+        `${displayName}: picture stream mode (motion/ring + push stills, no live video)`,
+      );
+    }
   }
 
   prewarm(): void {
-    void this.livestream.prewarm();
+    if (this.mode === 'live') {
+      void this.livestream.prewarm();
+    }
+    void this.refreshStoredSnapshot();
   }
 
   setController(controller: CameraController): void {
     this.controller = controller;
+  }
+
+  /** Update the still used for Home tiles / picture stream (e.g. after motion/ring). */
+  updateSnapshot(jpeg: Buffer): void {
+    if (jpeg.length > 100) {
+      this.cachedSnapshot = jpeg;
+    }
+  }
+
+  async refreshStoredSnapshot(): Promise<void> {
+    if (this.refreshInFlight) {
+      return this.refreshInFlight;
+    }
+    this.refreshInFlight = (async () => {
+      try {
+        const device = await this.client.getDevice(this.serial);
+        const stored = await device.camera?.()?.snapshotStored?.();
+        if (stored && stored.length > 100) {
+          this.cachedSnapshot = stored;
+          this.log.debug(
+            `Updated still for ${this.displayName} (${stored.length} bytes)`,
+          );
+        }
+      } catch (err) {
+        this.log.debug(`Still refresh failed: ${String(err)}`);
+      }
+    })().finally(() => {
+      this.refreshInFlight = undefined;
+    });
+    return this.refreshInFlight;
   }
 
   async dispose(): Promise<void> {
@@ -100,17 +146,16 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     request: SnapshotRequest,
     callback: SnapshotRequestCallback,
   ): void {
-    // Answer HomeKit immediately. Never open P2P on the snapshot path — that
-    // blocks the HAP event loop on 32-bit hosts and Home shows "No Response".
     const image = this.cachedSnapshot ?? placeholderJpeg();
     this.log.debug(
-      `Snapshot request ${this.displayName} ${request.width}x${request.height} (cache=${Boolean(this.cachedSnapshot)})`,
+      `Snapshot ${this.displayName} ${request.width}x${request.height} (cache=${Boolean(this.cachedSnapshot)})`,
     );
     try {
       callback(undefined, image);
     } catch (err) {
       this.log.warn(`Snapshot callback failed: ${String(err)}`);
     }
+    void this.refreshStoredSnapshot();
   }
 
   prepareStream(
@@ -142,42 +187,8 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     }
   }
 
-  private refreshInFlight?: Promise<void>;
-
-  /** Best-effort cache fill; never used on the HomeKit snapshot callback path. */
   async prefetchSnapshot(): Promise<void> {
-    await this.refreshSnapshotCache(640, 360);
-  }
-
-  private async refreshSnapshotCache(
-    width: number,
-    height: number,
-  ): Promise<void> {
-    if (this.refreshInFlight) {
-      return this.refreshInFlight;
-    }
-    this.refreshInFlight = this.doRefreshSnapshot(width, height).finally(() => {
-      this.refreshInFlight = undefined;
-    });
-    return this.refreshInFlight;
-  }
-
-  private async doRefreshSnapshot(
-    _width: number,
-    _height: number,
-  ): Promise<void> {
-    try {
-      const device = await this.client.getDevice(this.serial);
-      const stored = await device.camera?.()?.snapshotStored?.();
-      if (stored && stored.length > 100) {
-        this.cachedSnapshot = stored;
-        this.log.debug(
-          `Cached push thumbnail for ${this.displayName} (${stored.length} bytes)`,
-        );
-      }
-    } catch (err) {
-      this.log.debug(`Stored snapshot unavailable: ${String(err)}`);
-    }
+    await this.refreshStoredSnapshot();
   }
 
   private async prepare(request: PrepareStreamRequest) {
@@ -253,94 +264,198 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     };
 
     try {
-      this.log.info(
-        `HomeKit requested live stream for ${this.displayName} (${this.serial})`,
-      );
       active.socket = this.bindReturnSocket(sessionInfo, request);
-
-      const stream = await Promise.race([
-        this.livestream.getStream(),
-        new Promise<never>((_, reject) =>
-          setTimeout(
-            () =>
-              reject(
-                new Error(
-                  `P2P connect timed out opening livestream for ${this.serial}`,
-                ),
-              ),
-            15_000,
-          ),
-        ),
-      ]);
-      const videoPort = await serveReadableOnce(stream.videostream);
-      const v = request.video;
-
-      // Bitstream copy + low-delay flags — re-encode is too heavy on 32-bit Pis.
-      const videoArgs = [
-        '-hide_banner',
-        '-loglevel',
-        'error',
-        '-fflags',
-        'nobuffer',
-        '-flags',
-        'low_delay',
-        '-probesize',
-        '32',
-        '-analyzeduration',
-        '0',
-        '-use_wallclock_as_timestamps',
-        '1',
-        '-f',
-        'h264',
-        '-i',
-        `tcp://127.0.0.1:${videoPort}`,
-        '-an',
-        '-c:v',
-        'copy',
-        '-flush_packets',
-        '1',
-        '-payload_type',
-        String(v.pt),
-        '-ssrc',
-        String(sessionInfo.videoSSRC),
-        '-f',
-        'rtp',
-        '-srtp_out_suite',
-        'AES_CM_128_HMAC_SHA1_80',
-        '-srtp_out_params',
-        sessionInfo.videoSRTP.toString('base64'),
-        `srtp://${sessionInfo.address}:${sessionInfo.videoPort}?rtcpport=${sessionInfo.videoPort}&pkt_size=1128`,
-      ];
-
-      active.video = startFfmpeg(
-        this.ffmpegPath,
-        videoArgs,
-        () => {
-          this.log.info(
-            `Streaming ${this.displayName} (copy) toward ${v.width}x${v.height}@${v.fps}`,
-          );
-          safeCallback();
-        },
-        (err) => {
-          this.log.error(`Video ffmpeg error: ${err.message}`);
-          this.stopStream(request.sessionID);
-          safeCallback(err);
-        },
-      );
-
-      setTimeout(() => {
-        if (!callbackFired) {
-          const err = new Error('ffmpeg did not start streaming in time');
-          this.log.error(err.message);
-          this.stopStream(request.sessionID);
-          safeCallback(err);
-        }
-      }, 8_000);
+      if (this.mode === 'stills') {
+        await this.startStillsStream(request, sessionInfo, active, safeCallback);
+      } else {
+        await this.startLiveStream(request, sessionInfo, active, safeCallback);
+      }
     } catch (err) {
       this.log.error(`Failed to start stream: ${String(err)}`);
       this.stopStream(request.sessionID);
       safeCallback(err as Error);
     }
+  }
+
+  private async startStillsStream(
+    request: StartStreamRequest,
+    sessionInfo: SessionInfo,
+    active: ActiveSession,
+    safeCallback: (err?: Error) => void,
+  ): Promise<void> {
+    this.log.info(
+      `HomeKit picture stream for ${this.displayName} (${this.serial})`,
+    );
+    await this.refreshStoredSnapshot();
+    const jpeg = this.cachedSnapshot ?? placeholderJpeg();
+    const stillPath = path.join(
+      os.tmpdir(),
+      `eufy-still-${this.serial}-${request.sessionID}.jpg`,
+    );
+    fs.writeFileSync(stillPath, jpeg);
+    active.stillPath = stillPath;
+
+    const v = request.video;
+    const fps = Math.min(5, Math.max(1, v.fps || 2));
+    const videoArgs = [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-re',
+      '-loop',
+      '1',
+      '-framerate',
+      String(fps),
+      '-i',
+      stillPath,
+      '-an',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'ultrafast',
+      '-tune',
+      'stillimage',
+      '-pix_fmt',
+      'yuv420p',
+      '-vf',
+      `scale=${v.width}:${v.height}:force_original_aspect_ratio=decrease,pad=${v.width}:${v.height}:(ow-iw)/2:(oh-ih)/2`,
+      '-profile:v',
+      'baseline',
+      '-level:v',
+      '3.1',
+      '-b:v',
+      `${Math.max(100, v.max_bit_rate)}k`,
+      '-payload_type',
+      String(v.pt),
+      '-ssrc',
+      String(sessionInfo.videoSSRC),
+      '-f',
+      'rtp',
+      '-srtp_out_suite',
+      'AES_CM_128_HMAC_SHA1_80',
+      '-srtp_out_params',
+      sessionInfo.videoSRTP.toString('base64'),
+      `srtp://${sessionInfo.address}:${sessionInfo.videoPort}?rtcpport=${sessionInfo.videoPort}&pkt_size=1128`,
+    ];
+
+    active.video = startFfmpeg(
+      this.ffmpegPath,
+      videoArgs,
+      () => {
+        this.log.info(
+          `Picture-streaming ${this.displayName} ${v.width}x${v.height}@${fps}fps`,
+        );
+        safeCallback();
+      },
+      (err) => {
+        this.log.error(`Still ffmpeg error: ${err.message}`);
+        this.stopStream(request.sessionID);
+        safeCallback(err);
+      },
+    );
+
+    // Periodically pull a newer push thumbnail into the file for the next open;
+    // active ffmpeg keeps the still it opened with (stable picture stream).
+    active.stillRefresh = setInterval(() => {
+      void this.refreshStoredSnapshot().then(() => {
+        if (this.cachedSnapshot && active.stillPath) {
+          try {
+            fs.writeFileSync(active.stillPath, this.cachedSnapshot);
+          } catch {
+            // ignore
+          }
+        }
+      });
+    }, 15_000);
+
+    setTimeout(() => {
+      if (![...this.ongoing.values()].includes(active)) return;
+      // callback already handled by startFfmpeg fallback
+    }, 8_000);
+  }
+
+  private async startLiveStream(
+    request: StartStreamRequest,
+    sessionInfo: SessionInfo,
+    active: ActiveSession,
+    safeCallback: (err?: Error) => void,
+  ): Promise<void> {
+    this.log.info(
+      `HomeKit live stream for ${this.displayName} (${this.serial})`,
+    );
+
+    const stream = await Promise.race([
+      this.livestream.getStream(),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `P2P connect timed out opening livestream for ${this.serial}`,
+              ),
+            ),
+          15_000,
+        ),
+      ),
+    ]);
+    const videoPort = await serveReadableOnce(stream.videostream);
+    const v = request.video;
+
+    const videoArgs = [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-fflags',
+      'nobuffer',
+      '-flags',
+      'low_delay',
+      '-probesize',
+      '32',
+      '-analyzeduration',
+      '0',
+      '-use_wallclock_as_timestamps',
+      '1',
+      '-f',
+      'h264',
+      '-i',
+      `tcp://127.0.0.1:${videoPort}`,
+      '-an',
+      '-c:v',
+      'copy',
+      '-flush_packets',
+      '1',
+      '-payload_type',
+      String(v.pt),
+      '-ssrc',
+      String(sessionInfo.videoSSRC),
+      '-f',
+      'rtp',
+      '-srtp_out_suite',
+      'AES_CM_128_HMAC_SHA1_80',
+      '-srtp_out_params',
+      sessionInfo.videoSRTP.toString('base64'),
+      `srtp://${sessionInfo.address}:${sessionInfo.videoPort}?rtcpport=${sessionInfo.videoPort}&pkt_size=1128`,
+    ];
+
+    active.video = startFfmpeg(
+      this.ffmpegPath,
+      videoArgs,
+      () => {
+        this.log.info(
+          `Streaming ${this.displayName} (copy) toward ${v.width}x${v.height}@${v.fps}`,
+        );
+        safeCallback();
+      },
+      (err) => {
+        this.log.error(`Video ffmpeg error: ${err.message}`);
+        this.stopStream(request.sessionID);
+        safeCallback(err);
+      },
+    );
+
+    setTimeout(() => {
+      // startFfmpeg also has a 2.5s started fallback
+    }, 8_000);
   }
 
   private bindReturnSocket(
@@ -373,12 +488,22 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       return;
     }
     if (active.timeout) clearTimeout(active.timeout);
+    if (active.stillRefresh) clearInterval(active.stillRefresh);
     active.video?.stop();
     try {
       active.socket?.close();
     } catch {
       // ignore
     }
-    this.livestream.release();
+    if (active.stillPath) {
+      try {
+        fs.unlinkSync(active.stillPath);
+      } catch {
+        // ignore
+      }
+    }
+    if (this.mode === 'live') {
+      this.livestream.release();
+    }
   }
 }

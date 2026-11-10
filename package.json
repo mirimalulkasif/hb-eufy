@@ -1,7 +1,7 @@
 {
   "name": "homebridge-eufy-cameras",
   "displayName": "Eufy Cameras",
-  "version": "2.0.11",
+  "version": "2.1.0",
   "description": "Homebridge plugin for Eufy doorbell and indoor cameras — HomeKit live video via Eufy Mega (v6) cloud.",
   "license": "MIT",
   "keywords": [

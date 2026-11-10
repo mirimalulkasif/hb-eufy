@@ -94,12 +94,9 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
     this.log.info(
       `Using Eufy Mega cloud (country=${this.country}, node=${process.version}, arch=${process.arch}), persist=${this.persistDir}`,
     );
-    if (process.arch === 'arm' || process.arch === 'ia32') {
-      this.log.warn(
-        '32-bit host detected: standalone T8223/T8224 doorbell live uses P2P fallback (no WebRTC native). ' +
-          'Indoor cameras (e.g. T8400) already use P2P.',
-      );
-    }
+    this.log.info(
+      'Doorbell accessories use motion + ring + picture stream (push stills). Indoor cameras use P2P live video.',
+    );
 
     try {
       const { client } = await loginMega(this.log, {
@@ -161,10 +158,7 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
         );
       }
       if (/RTC sign|node-datachannel|WebRTC transport/i.test(message)) {
-        this.log.warn(
-          'This camera’s native live path is WebRTC. On 32-bit ARM the plugin falls back to P2P; ' +
-            'ring/motion can still work via push. Live video for T8223/T8224 is most reliable on 64-bit.',
-        );
+        this.log.debug(`Ignoring RTC noise (doorbells use picture stream): ${message}`);
       }
     });
   }

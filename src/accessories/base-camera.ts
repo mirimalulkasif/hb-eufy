@@ -168,6 +168,7 @@ export abstract class BaseCameraAccessory {
       clearTimeout(this.motionTimer);
     }
     if (active) {
+      void this.streaming?.refreshStoredSnapshot();
       const hold = this.platform.eventHoldSeconds * 1000;
       this.motionTimer = setTimeout(() => {
         this.motionService?.updateCharacteristic(

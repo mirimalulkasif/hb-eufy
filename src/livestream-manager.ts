@@ -21,11 +21,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isStandaloneCallDoorbell(model: string): boolean {
-  const m = model.toUpperCase();
-  return m.startsWith('T8223') || m.startsWith('T8224');
-}
-
 /**
  * Opens a Mega SDK Annex-B video Readable for one camera serial.
  */
@@ -53,9 +48,6 @@ export class LivestreamManager {
 
   /** Open (or keep) the station P2P session so the next live view starts faster. */
   async prewarm(): Promise<void> {
-    if (this.isDoorbellWithoutWebRtc()) {
-      return;
-    }
     try {
       await this.client.connectStation(this.serial);
       this.log.info(`Pre-warmed P2P for ${this.serial}`);
@@ -118,26 +110,9 @@ export class LivestreamManager {
     await this.forceStop();
   }
 
-  private isDoorbellWithoutWebRtc(): boolean {
-    return (
-      this.kind === 'doorbell' &&
-      isStandaloneCallDoorbell(this.model) &&
-      (process.arch === 'arm' || process.arch === 'ia32')
-    );
-  }
-
   private async openWithRetry(): Promise<Readable> {
     if (this.opening) {
       return this.opening;
-    }
-
-    // Standalone T8223/T8224 need WebRTC on modern firmware. On 32-bit we have no
-    // node-datachannel — fail fast instead of hanging HomeKit for a minute+.
-    if (this.isDoorbellWithoutWebRtc()) {
-      throw new Error(
-        `Live video for ${this.model} needs WebRTC (64-bit Node + node-datachannel). ` +
-          'Ring/motion still work on this 32-bit host; open Living Room for P2P live video.',
-      );
     }
 
     const retry = this.kind === 'indoor';

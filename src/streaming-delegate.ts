@@ -329,7 +329,6 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         codec === this.hap.AudioStreamingCodecType.OPUS
           ? { encoder: 'libopus', opts: ['-application', 'lowdelay'] }
           : { encoder: 'libfdk_aac', opts: ['-profile:a', 'aac_eld'] };
-      // If libfdk_aac is missing on a custom ffmpeg, HomeKit still accepts AAC-LC.
 
       const audioPort = await serveReadableOnce(audiostream);
       const args = [

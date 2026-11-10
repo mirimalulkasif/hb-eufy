@@ -42,16 +42,6 @@
         "default": 15,
         "minimum": 5
       },
-      "mfaCode": {
-        "title": "MFA / 2FA code",
-        "type": "string",
-        "description": "Only when Eufy emails/SMS a login code. Clear after a successful connect."
-      },
-      "captchaCode": {
-        "title": "Captcha answer",
-        "type": "string",
-        "description": "4-character answer from captcha.png in the plugin persist folder. Clear after success."
-      },
       "ffmpegPath": {
         "title": "Custom ffmpeg path",
         "type": "string",

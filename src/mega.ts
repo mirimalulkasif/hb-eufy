@@ -22,12 +22,74 @@ export type MegaLoginConfig = {
   password: string;
   countryCode: string;
   persistDir: string;
-  mfaCode?: string;
-  captchaCode?: string;
 };
 
+const MFA_FILE = 'mfa-code.txt';
+const CAPTCHA_FILE = 'captcha-code.txt';
+const CAPTCHA_IMAGE = 'captcha.png';
+const CODE_WAIT_MS = 5 * 60 * 1000;
+const CODE_POLL_MS = 2000;
+
+function readCodeFile(filePath: string): string | undefined {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return undefined;
+    }
+    const value = fs.readFileSync(filePath, 'utf8').trim();
+    return value || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function clearCodeFile(filePath: string): void {
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {
+    // ignore
+  }
+}
+
 /**
- * Login to Eufy Mega (v6). Handles captcha / 2FA via config values when present.
+ * Wait for the user to drop a one-time code into a file.
+ * Do NOT restart Homebridge — a restart requests a new code and invalidates this one.
+ */
+async function waitForCodeFile(
+  log: Logging,
+  filePath: string,
+  label: string,
+  timeoutMs: number,
+): Promise<string> {
+  clearCodeFile(filePath);
+  const deadline = Date.now() + timeoutMs;
+  log.warn(
+    `${label} required. Do NOT restart Homebridge.\n` +
+      `  1) Wait for the code (email/SMS or captcha image).\n` +
+      `  2) Write it to this file (one line):\n` +
+      `     ${filePath}\n` +
+      `  Example: echo '123456' > "${filePath}"\n` +
+      `Waiting up to ${Math.round(timeoutMs / 60000)} minutes…`,
+  );
+
+  while (Date.now() < deadline) {
+    const code = readCodeFile(filePath);
+    if (code) {
+      clearCodeFile(filePath);
+      log.info(`${label} code received from ${path.basename(filePath)}.`);
+      return code;
+    }
+    await new Promise((resolve) => setTimeout(resolve, CODE_POLL_MS));
+  }
+  throw new Error(
+    `${label} timed out waiting for ${filePath}. Restart the plugin to request a new code.`,
+  );
+}
+
+/**
+ * Login to Eufy Mega (v6).
+ * Captcha / 2FA are completed via files in persistDir so you do not restart mid-challenge.
  */
 export async function loginMega(
   log: Logging,
@@ -36,6 +98,9 @@ export async function loginMega(
   const sdk = await loadMegaSdk();
   const sessionPath = path.join(cfg.persistDir, 'eufy-session.json');
   const pushPath = path.join(cfg.persistDir, 'eufy-push.json');
+  const mfaPath = path.join(cfg.persistDir, MFA_FILE);
+  const captchaCodePath = path.join(cfg.persistDir, CAPTCHA_FILE);
+  const captchaImagePath = path.join(cfg.persistDir, CAPTCHA_IMAGE);
 
   const client = new sdk.EufyMega({
     email: cfg.email,
@@ -48,43 +113,56 @@ export async function loginMega(
   let result = await client.login();
   const { LoginStatus } = sdk;
 
-  if (result.status === LoginStatus.Captcha) {
-    const captchaFile = path.join(cfg.persistDir, 'captcha.png');
-    try {
-      const raw = result.image.includes('base64,')
-        ? result.image.split('base64,')[1]
-        : result.image;
-      fs.writeFileSync(captchaFile, Buffer.from(raw, 'base64'));
-      log.warn(`Eufy captcha required. Image saved to: ${captchaFile}`);
-    } catch (err) {
-      log.warn(`Could not write captcha image: ${String(err)}`);
+  // Allow a few challenge steps (captcha then 2FA, or retries).
+  for (let step = 0; step < 4; step++) {
+    if (result.status === LoginStatus.Ok) {
+      break;
     }
-    if (!cfg.captchaCode) {
-      throw new Error(
-        `Captcha required — open ${captchaFile}, set captchaCode in config, restart`,
+
+    if (result.status === LoginStatus.Captcha) {
+      try {
+        const raw = result.image.includes('base64,')
+          ? result.image.split('base64,')[1]
+          : result.image;
+        fs.writeFileSync(captchaImagePath, Buffer.from(raw, 'base64'));
+        log.warn(`Captcha image saved to: ${captchaImagePath}`);
+      } catch (err) {
+        log.warn(`Could not write captcha image: ${String(err)}`);
+      }
+      const answer = await waitForCodeFile(
+        log,
+        captchaCodePath,
+        'Captcha',
+        CODE_WAIT_MS,
       );
+      result = await client.solveCaptcha(answer);
+      continue;
     }
-    result = await client.solveCaptcha(String(cfg.captchaCode).trim());
-  }
 
-  if (result.status === LoginStatus.TwoFactor) {
-    log.warn(
-      `Eufy 2FA required (method=${result.method}). Set mfaCode in config and restart.`,
-    );
-    if (!cfg.mfaCode) {
-      throw new Error('2FA code required — set mfaCode in plugin config and restart');
+    if (result.status === LoginStatus.TwoFactor) {
+      log.warn(`Eufy 2FA required (method=${result.method}).`);
+      const code = await waitForCodeFile(log, mfaPath, '2FA', CODE_WAIT_MS);
+      result = await client.submitVerifyCode(code);
+      continue;
     }
-    result = await client.submitVerifyCode(String(cfg.mfaCode).trim());
-  }
 
-  if (result.status === LoginStatus.Captcha) {
-    throw new Error('Captcha still required after captchaCode — try again with a fresh code');
-  }
-  if (result.status === LoginStatus.TwoFactor) {
-    throw new Error('2FA still required after mfaCode — try a fresh code');
-  }
-  if (result.status !== LoginStatus.Ok) {
     throw new Error(`Unexpected login status: ${JSON.stringify(result)}`);
+  }
+
+  if (result.status !== LoginStatus.Ok) {
+    throw new Error(
+      `Login did not complete (status=${String((result as { status: string }).status)}).`,
+    );
+  }
+
+  clearCodeFile(mfaPath);
+  clearCodeFile(captchaCodePath);
+  try {
+    if (fs.existsSync(captchaImagePath)) {
+      fs.unlinkSync(captchaImagePath);
+    }
+  } catch {
+    // ignore
   }
 
   log.info('Logged into Eufy Mega (v6) cloud.');
@@ -110,7 +188,6 @@ export function classifyMegaDevice(info: EufyDeviceInfo): 'doorbell' | 'indoor' 
   ) {
     return 'indoor';
   }
-  // Other security cameras — still expose as indoor-style (motion + video).
   if (info.category === 'eufy_security' || info.category === 'eufy_mega') {
     return 'indoor';
   }

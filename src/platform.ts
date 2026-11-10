@@ -100,14 +100,6 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
         password,
         countryCode: this.country,
         persistDir: this.persistDir,
-        mfaCode:
-          typeof this.config.mfaCode === 'string'
-            ? this.config.mfaCode
-            : undefined,
-        captchaCode:
-          typeof this.config.captchaCode === 'string'
-            ? this.config.captchaCode
-            : undefined,
       });
       this.client = client;
       this.bindClientEvents(client);
@@ -116,7 +108,7 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
     } catch (err) {
       this.log.error(`Eufy Cameras failed to start: ${String(err)}`);
       this.log.warn(
-        'If captcha/2FA is required, set captchaCode or mfaCode and restart. Clear those fields after a successful login.',
+        'If captcha/2FA is required, do NOT restart — write the code into mfa-code.txt or captcha-code.txt under the eufy-cameras persist folder (see logs for the path).',
       );
     }
   }

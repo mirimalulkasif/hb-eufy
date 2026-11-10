@@ -23,7 +23,23 @@ export type MegaLoginConfig = {
   countryCode: string;
   persistDir: string;
   configPath?: string;
+  ffmpegPath?: string;
+  debug?: boolean;
 };
+
+function hbLogger(log: Logging): {
+  debug: (message: string, ...args: unknown[]) => void;
+  info: (message: string, ...args: unknown[]) => void;
+  warn: (message: string, ...args: unknown[]) => void;
+  error: (message: string, ...args: unknown[]) => void;
+} {
+  return {
+    debug: (message, ...args) => log.debug(message, ...args),
+    info: (message, ...args) => log.info(message, ...args),
+    warn: (message, ...args) => log.warn(message, ...args),
+    error: (message, ...args) => log.error(message, ...args),
+  };
+}
 
 const MFA_FILE = 'mfa-code.txt';
 const CAPTCHA_FILE = 'captcha-code.txt';
@@ -246,6 +262,14 @@ export async function loginMega(
     countryCode: cfg.countryCode,
     store: new sdk.FileSessionStore(sessionPath),
     pushStore: new sdk.FileFcmStore(pushPath),
+    ...(cfg.ffmpegPath ? { ffmpegPath: cfg.ffmpegPath } : {}),
+    // Always surface P2P/media warnings into Homebridge logs; full debug when enabled.
+    logger: cfg.debug ? hbLogger(log) : {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: (message, ...args) => log.warn(message, ...args),
+      error: (message, ...args) => log.error(message, ...args),
+    },
   });
 
   const { LoginStatus } = sdk;

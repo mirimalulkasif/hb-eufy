@@ -128,6 +128,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
   }
 
   private async takeSnapshot(width: number, height: number): Promise<Buffer> {
+    // Prefer a cached push thumbnail — avoids opening P2P just for HomeKit tile refresh.
     try {
       const device = await this.client.getDevice(this.serial);
       const cam = device.camera?.();
@@ -136,25 +137,55 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         this.cachedSnapshot = stored;
         return stored;
       }
-      const live = await cam?.snapshotLive?.();
-      if (live?.jpeg?.length) {
-        this.cachedSnapshot = live.jpeg;
-        return live.jpeg;
+    } catch (err) {
+      this.log.debug(`Stored snapshot unavailable: ${String(err)}`);
+    }
+
+    if (this.cachedSnapshot) {
+      return this.cachedSnapshot;
+    }
+
+    // Live JPEG / remux can take a full P2P connect — bound it so HomeKit does not hang.
+    try {
+      const jpeg = await Promise.race([
+        this.grabLiveSnapshot(width, height),
+        new Promise<undefined>((resolve) =>
+          setTimeout(() => resolve(undefined), 12_000),
+        ),
+      ]);
+      if (jpeg?.length) {
+        this.cachedSnapshot = jpeg;
+        return jpeg;
       }
     } catch (err) {
-      this.log.debug(`Native snapshot unavailable: ${String(err)}`);
+      this.log.debug(`Live snapshot unavailable: ${String(err)}`);
+    }
+
+    return placeholderJpeg();
+  }
+
+  private async grabLiveSnapshot(
+    width: number,
+    height: number,
+  ): Promise<Buffer | undefined> {
+    try {
+      const device = await this.client.getDevice(this.serial);
+      const live = await device.camera?.()?.snapshotLive?.();
+      if (live?.jpeg?.length) {
+        return live.jpeg;
+      }
+    } catch {
+      // fall through to ffmpeg remux
     }
 
     const stream = await this.livestream.getStream();
     try {
-      const jpeg = await grabJpegFromStream(
+      return await grabJpegFromStream(
         this.ffmpegPath,
         stream.videostream,
         width,
         height,
       );
-      this.cachedSnapshot = jpeg;
-      return jpeg;
     } finally {
       this.livestream.release();
     }

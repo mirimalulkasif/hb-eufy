@@ -47,6 +47,12 @@
         "type": "string",
         "description": "Optional. Defaults to ffmpeg-for-homebridge, then system ffmpeg."
       },
+      "debug": {
+        "title": "Debug logging",
+        "type": "boolean",
+        "default": false,
+        "description": "Log Mega P2P/media diagnostics into Homebridge (useful for connect timeouts)."
+      },
       "mfaCode": {
         "title": "2FA code",
         "type": "string",

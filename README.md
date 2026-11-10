@@ -60,7 +60,8 @@ After a successful login the session is stored, so later starts usually need no 
 
 ## Notes
 
-- Live video uses Mega P2P + ffmpeg remux to HomeKit SRTP.
+- Live video uses Mega P2P + ffmpeg remux to HomeKit SRTP. Homebridge must be on the **same LAN** as the cameras (avoid guest Wi‑Fi isolation / Docker bridge networking).
+- If you see `P2P connect timeout … (relay: not started)`, open the camera in the Eufy app to confirm it is online, then set `"debug": true` in the plugin config and retry.
 - On Node 22, E2E media keys use a PKCS#1 unwrap fallback (Node 24 is not required).
 - Delete the `eufy-cameras` persist folder if you change account/country and need a clean login.
 - HomeKit Secure Video recording is not included in this version.

@@ -101,6 +101,11 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
         countryCode: this.country,
         persistDir: this.persistDir,
         configPath: this.api.user.configPath(),
+        ffmpegPath:
+          typeof this.config.ffmpegPath === 'string'
+            ? this.config.ffmpegPath
+            : undefined,
+        debug: Boolean(this.config.debug),
       });
       this.client = client;
       this.bindClientEvents(client);
@@ -139,7 +144,15 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
       this.log.warn('Eufy session expired — will re-login on next refresh');
     });
     client.on('error', (err: unknown) => {
-      this.log.warn(`Eufy Mega error: ${String(err)}`);
+      const message = String(err);
+      this.log.warn(`Eufy Mega error: ${message}`);
+      if (/P2P connect timeout/i.test(message)) {
+        this.log.warn(
+          'P2P could not reach that camera in time. Check: camera online in the Eufy app, ' +
+            'Homebridge on the same LAN (not isolated guest Wi‑Fi / Docker bridge), ' +
+            'and UDP not blocked. Set "debug": true in the plugin config for [p2p] traces.',
+        );
+      }
     });
   }
 

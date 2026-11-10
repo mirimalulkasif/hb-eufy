@@ -22,16 +22,55 @@ export type MegaLoginConfig = {
   password: string;
   countryCode: string;
   persistDir: string;
-  /** Absolute path to Homebridge config.json (optional). Polled for mfaCode/captchaCode. */
   configPath?: string;
 };
 
 const MFA_FILE = 'mfa-code.txt';
 const CAPTCHA_FILE = 'captcha-code.txt';
 const CAPTCHA_IMAGE = 'captcha.png';
-const CODE_WAIT_MS = 5 * 60 * 1000;
-const CODE_POLL_MS = 2000;
-const PROGRESS_EVERY_MS = 15_000;
+const PENDING_2FA_FILE = 'eufy-2fa-pending.json';
+
+type Pending2faState = {
+  email: string;
+  countryCode: string;
+  auth: {
+    userId: string;
+    accountUserId?: string;
+    authToken: string;
+    geoKey?: string;
+  };
+  region: string;
+  estimatedDomain?: string;
+  sessionKey: unknown;
+  savedAt: number;
+};
+
+type MegaApi = {
+  auth_?: Pending2faState['auth'];
+  pending2fa?: boolean;
+  region?: string;
+  estimatedDomain?: string;
+  sessionKey?: unknown;
+  loginBody: (opts: {
+    verifyCode?: string;
+    captchaId?: string;
+    answer?: string;
+  }) => Record<string, unknown>;
+  attemptLogin: (
+    body: Record<string, unknown>,
+    messageType: number,
+  ) => Promise<{ status: string; [key: string]: unknown }>;
+  estimateDomain?: () => Promise<void>;
+  ensureSessionKey?: () => Promise<unknown>;
+};
+
+function getApi(client: EufyMega): MegaApi {
+  return client.api as unknown as MegaApi;
+}
+
+function pendingPath(persistDir: string): string {
+  return path.join(persistDir, PENDING_2FA_FILE);
+}
 
 function readCodeFile(filePath: string): string | undefined {
   try {
@@ -76,92 +115,122 @@ function readCodeFromHomebridgeConfig(
       }
     }
   } catch {
-    // ignore parse errors while the UI is writing the file
+    // ignore
   }
   return undefined;
 }
 
-type WaitOptions = {
-  log: Logging;
-  filePath: string;
-  label: string;
-  timeoutMs: number;
-  configPath?: string;
-  configField?: 'mfaCode' | 'captchaCode';
-  /** Codes already tried (rejected) — ignore until something new appears. */
-  rejectCodes?: Set<string>;
-};
-
-/**
- * Wait for a one-time code without restarting Homebridge.
- * Prefer the persist file. Config is also polled, but saving config in the UI
- * restarts the child bridge and requests a NEW code — that path is discouraged.
- */
-async function waitForCode(opts: WaitOptions): Promise<string> {
-  const {
-    log,
-    filePath,
-    label,
-    timeoutMs,
-    configPath,
-    configField,
-    rejectCodes = new Set(),
-  } = opts;
-
-  const deadline = Date.now() + timeoutMs;
-  let nextProgressAt = Date.now() + PROGRESS_EVERY_MS;
-  let attempt = 0;
-
-  log.warn(
-    `${label} required. Do NOT restart Homebridge and do NOT save the plugin config in the UI ` +
-      `(that restarts the bridge and requests a new code).\n` +
-      `  Write the code to this file (one line):\n` +
-      `     ${filePath}\n` +
-      `  Example: echo '123456' > "${filePath}"`,
+function readExistingMfaCode(
+  persistDir: string,
+  configPath?: string,
+): string | undefined {
+  return (
+    readCodeFile(path.join(persistDir, MFA_FILE)) ||
+    readCodeFromHomebridgeConfig(configPath, 'mfaCode')
   );
+}
 
-  while (Date.now() < deadline) {
-    attempt += 1;
-    const fromFile = readCodeFile(filePath);
-    const fromConfig =
-      configField && configPath
-        ? readCodeFromHomebridgeConfig(configPath, configField)
-        : undefined;
-    const code = fromFile || fromConfig;
+function readExistingCaptchaCode(
+  persistDir: string,
+  configPath?: string,
+): string | undefined {
+  return (
+    readCodeFile(path.join(persistDir, CAPTCHA_FILE)) ||
+    readCodeFromHomebridgeConfig(configPath, 'captchaCode')
+  );
+}
 
-    if (code && !rejectCodes.has(code)) {
-      if (fromFile) {
-        clearCodeFile(filePath);
-        log.info(`${label} code received from ${path.basename(filePath)}.`);
-      } else {
-        log.info(
-          `${label} code read from config.json (${configField}). ` +
-            'Prefer the mfa-code.txt file next time to avoid UI restarts.',
-        );
-      }
-      return code;
-    }
-
-    if (Date.now() >= nextProgressAt) {
-      const leftSec = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
-      log.info(
-        `Still waiting for ${label}… check #${attempt}, ${leftSec}s left. ` +
-          `File: ${filePath}`,
-      );
-      nextProgressAt = Date.now() + PROGRESS_EVERY_MS;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, CODE_POLL_MS));
+function loadPending2fa(
+  persistDir: string,
+  email: string,
+  countryCode: string,
+): Pending2faState | undefined {
+  const file = pendingPath(persistDir);
+  if (!fs.existsSync(file)) {
+    return undefined;
   }
+  try {
+    const state = JSON.parse(fs.readFileSync(file, 'utf8')) as Pending2faState;
+    if (state.email !== email || state.countryCode !== countryCode) {
+      return undefined;
+    }
+    // Ignore challenges older than 30 minutes
+    if (Date.now() - state.savedAt > 30 * 60 * 1000) {
+      clearPending2fa(persistDir);
+      return undefined;
+    }
+    if (!state.auth?.authToken || !state.region) {
+      return undefined;
+    }
+    return state;
+  } catch {
+    return undefined;
+  }
+}
 
-  throw new Error(
-    `${label} timed out after ${Math.round(timeoutMs / 1000)}s waiting for ${filePath}.`,
+function savePending2fa(
+  persistDir: string,
+  client: EufyMega,
+  email: string,
+  countryCode: string,
+): void {
+  const api = getApi(client);
+  if (!api.auth_?.authToken || !api.region) {
+    throw new Error('Cannot save 2FA pending state — missing limited auth token');
+  }
+  const state: Pending2faState = {
+    email,
+    countryCode,
+    auth: { ...api.auth_ },
+    region: api.region,
+    estimatedDomain: api.estimatedDomain,
+    sessionKey: api.sessionKey,
+    savedAt: Date.now(),
+  };
+  fs.writeFileSync(pendingPath(persistDir), JSON.stringify(state, null, 2));
+}
+
+function clearPending2fa(persistDir: string): void {
+  clearCodeFile(pendingPath(persistDir));
+}
+
+function restorePending2fa(client: EufyMega, state: Pending2faState): void {
+  const api = getApi(client);
+  api.auth_ = { ...state.auth };
+  api.pending2fa = true;
+  api.region = state.region;
+  api.estimatedDomain = state.estimatedDomain;
+  api.sessionKey = state.sessionKey;
+}
+
+function clearAuthCodes(persistDir: string): void {
+  clearCodeFile(path.join(persistDir, MFA_FILE));
+  clearCodeFile(path.join(persistDir, CAPTCHA_FILE));
+  try {
+    const img = path.join(persistDir, CAPTCHA_IMAGE);
+    if (fs.existsSync(img)) {
+      fs.unlinkSync(img);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function twoFaRestartMessage(persistDir: string): string {
+  return (
+    `2FA code was sent / is pending. Put the code in config mfaCode OR in:\n` +
+    `  ${path.join(persistDir, MFA_FILE)}\n` +
+    `Then restart Homebridge. The next start will submit that code and will NOT request a new one.`
   );
 }
 
 /**
  * Login to Eufy Mega (v6).
- * Captcha / 2FA are completed via persist files (and optionally config) while the process stays up.
+ *
+ * Restart-friendly 2FA:
+ * 1) If a pending challenge + code exist → submit code (no new SMS/email).
+ * 2) If that fails or there is no pending challenge → login (may send a new code),
+ *    save the challenge, and stop so you can set the code and restart.
  */
 export async function loginMega(
   log: Logging,
@@ -170,9 +239,6 @@ export async function loginMega(
   const sdk = await loadMegaSdk();
   const sessionPath = path.join(cfg.persistDir, 'eufy-session.json');
   const pushPath = path.join(cfg.persistDir, 'eufy-push.json');
-  const mfaPath = path.join(cfg.persistDir, MFA_FILE);
-  const captchaCodePath = path.join(cfg.persistDir, CAPTCHA_FILE);
-  const captchaImagePath = path.join(cfg.persistDir, CAPTCHA_IMAGE);
 
   const client = new sdk.EufyMega({
     email: cfg.email,
@@ -182,17 +248,55 @@ export async function loginMega(
     pushStore: new sdk.FileFcmStore(pushPath),
   });
 
-  let result = await client.login();
   const { LoginStatus } = sdk;
-  const rejectedMfa = new Set<string>();
-  const rejectedCaptcha = new Set<string>();
+  const existingMfa = readExistingMfaCode(cfg.persistDir, cfg.configPath);
+  const pending = loadPending2fa(cfg.persistDir, cfg.email, cfg.countryCode);
 
-  for (let step = 0; step < 6; step++) {
+  // --- Path A: resume pending challenge with an existing code (no new 2FA send) ---
+  if (pending && existingMfa) {
+    log.info(
+      'Using saved 2FA challenge + existing code (no new 2FA request)…',
+    );
+    try {
+      restorePending2fa(client, pending);
+      const resumed = await client.submitVerifyCode(existingMfa);
+      if (resumed.status === LoginStatus.Ok) {
+        clearPending2fa(cfg.persistDir);
+        clearAuthCodes(cfg.persistDir);
+        log.info('Logged into Eufy Mega (v6) cloud.');
+        return { sdk, client };
+      }
+      log.warn(
+        `Existing 2FA code was not accepted (status=${resumed.status}). ` +
+          'Will start a fresh login and request a new code.',
+      );
+    } catch (err) {
+      log.warn(
+        `Existing 2FA code failed: ${String(err)}. ` +
+          'Will start a fresh login and request a new code.',
+      );
+    }
+    clearPending2fa(cfg.persistDir);
+  } else if (pending && !existingMfa) {
+    log.warn(
+      'A 2FA challenge is still pending, but no code was found in config/mfa-code.txt. ' +
+        'Add the code and restart — or wait for a fresh login below if the challenge expired.',
+    );
+  }
+
+  // --- Path B: normal login (restores full session when possible) ---
+  let result = await client.login();
+
+  for (let step = 0; step < 4; step++) {
     if (result.status === LoginStatus.Ok) {
-      break;
+      clearPending2fa(cfg.persistDir);
+      clearAuthCodes(cfg.persistDir);
+      log.info('Logged into Eufy Mega (v6) cloud.');
+      return { sdk, client };
     }
 
     if (result.status === LoginStatus.Captcha) {
+      const captchaImagePath = path.join(cfg.persistDir, CAPTCHA_IMAGE);
       try {
         const raw = result.image.includes('base64,')
           ? result.image.split('base64,')[1]
@@ -202,66 +306,49 @@ export async function loginMega(
       } catch (err) {
         log.warn(`Could not write captcha image: ${String(err)}`);
       }
-      const answer = await waitForCode({
-        log,
-        filePath: captchaCodePath,
-        label: 'Captcha',
-        timeoutMs: CODE_WAIT_MS,
-        configPath: cfg.configPath,
-        configField: 'captchaCode',
-        rejectCodes: rejectedCaptcha,
-      });
-      result = await client.solveCaptcha(answer);
-      if (result.status === LoginStatus.Captcha) {
-        rejectedCaptcha.add(answer);
-        log.warn('Captcha was rejected — waiting for a new answer.');
+
+      const captchaCode = readExistingCaptchaCode(cfg.persistDir, cfg.configPath);
+      if (!captchaCode) {
+        throw new Error(
+          `Captcha required. Open ${captchaImagePath}, put the answer in captchaCode config ` +
+            `or ${path.join(cfg.persistDir, CAPTCHA_FILE)}, then restart.`,
+        );
       }
+      log.info('Submitting captcha from config/file…');
+      result = await client.solveCaptcha(captchaCode);
       continue;
     }
 
     if (result.status === LoginStatus.TwoFactor) {
-      log.warn(`Eufy 2FA required (method=${result.method}).`);
-      const code = await waitForCode({
-        log,
-        filePath: mfaPath,
-        label: '2FA',
-        timeoutMs: CODE_WAIT_MS,
-        configPath: cfg.configPath,
-        configField: 'mfaCode',
-        rejectCodes: rejectedMfa,
-      });
-      result = await client.submitVerifyCode(code);
-      if (result.status === LoginStatus.TwoFactor) {
-        rejectedMfa.add(code);
+      // login() has already requested a code for THIS challenge — save it for the next restart.
+      try {
+        savePending2fa(cfg.persistDir, client, cfg.email, cfg.countryCode);
+      } catch (err) {
+        log.warn(`Could not persist 2FA challenge: ${String(err)}`);
+      }
+
+      if (existingMfa) {
+        log.info('Trying 2FA code from config/file against this challenge…');
+        result = await client.submitVerifyCode(existingMfa);
+        if (result.status === LoginStatus.Ok) {
+          clearPending2fa(cfg.persistDir);
+          clearAuthCodes(cfg.persistDir);
+          log.info('Logged into Eufy Mega (v6) cloud.');
+          return { sdk, client };
+        }
         log.warn(
-          '2FA code was rejected (wrong/expired, or a new code was issued). ' +
-            'Waiting for a fresh code in mfa-code.txt — do not restart.',
+          `2FA code was rejected (status=${result.status}). ` +
+            'A code was already requested for this challenge — update mfaCode / mfa-code.txt with the latest code and restart.',
         );
       }
-      continue;
+
+      throw new Error(twoFaRestartMessage(cfg.persistDir));
     }
 
     throw new Error(`Unexpected login status: ${JSON.stringify(result)}`);
   }
 
-  if (result.status !== LoginStatus.Ok) {
-    throw new Error(
-      `Login did not complete (status=${String((result as { status: string }).status)}).`,
-    );
-  }
-
-  clearCodeFile(mfaPath);
-  clearCodeFile(captchaCodePath);
-  try {
-    if (fs.existsSync(captchaImagePath)) {
-      fs.unlinkSync(captchaImagePath);
-    }
-  } catch {
-    // ignore
-  }
-
-  log.info('Logged into Eufy Mega (v6) cloud.');
-  return { sdk, client };
+  throw new Error('Login did not complete.');
 }
 
 /** Doorbell / indoor filter for this plugin. */

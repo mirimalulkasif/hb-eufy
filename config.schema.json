@@ -48,14 +48,14 @@
         "description": "Optional. Defaults to ffmpeg-for-homebridge, then system ffmpeg."
       },
       "mfaCode": {
-        "title": "2FA code (discouraged)",
+        "title": "2FA code",
         "type": "string",
-        "description": "Saving this in the UI restarts the child bridge and requests a NEW code. Prefer: echo CODE > /var/lib/homebridge/eufy-cameras/mfa-code.txt"
+        "description": "After logs say a code was sent, paste it here and restart. Restart submits this code and does not request a new one unless it fails."
       },
       "captchaCode": {
-        "title": "Captcha answer (discouraged)",
+        "title": "Captcha answer",
         "type": "string",
-        "description": "Prefer captcha-code.txt in the eufy-cameras persist folder so Homebridge does not restart mid-login."
+        "description": "After captcha.png is written under eufy-cameras/, paste the answer here and restart."
       }
     }
   }

@@ -19,7 +19,6 @@ import { StreamRequestTypes } from 'homebridge';
 import { pickPort } from 'pick-port';
 
 import {
-  grabJpegFromStream,
   placeholderJpeg,
   resolveFfmpegPath,
   serveReadableOnce,

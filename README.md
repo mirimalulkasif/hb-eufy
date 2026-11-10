@@ -61,7 +61,10 @@ After a successful login the session is stored, so later starts usually need no 
 ## Notes
 
 - Live video uses Mega P2P + ffmpeg remux to HomeKit SRTP. Homebridge must be on the **same LAN** as the cameras (avoid guest Wi‑Fi isolation / Docker bridge networking).
+- Indoor cameras (T8400, …) stream over P2P. The plugin pre-warms that link after login to cut open delay.
+- Standalone **T8223/T8224** doorbells need WebRTC for live video. On **32-bit ARM** live view is not available (ring/motion still work). Use a 64-bit host for doorbell live.
 - If you see `P2P connect timeout … (relay: not started)`, open the camera in the Eufy app to confirm it is online, then set `"debug": true` in the plugin config and retry.
+- **Ghost "No Response" cameras** from older plugin versions: delete them in the Home app, or remove and re-add the Eufy Cameras child bridge (scan the QR again). The plugin only controls accessories on the current bridge.
 - On Node 22, E2E media keys use a PKCS#1 unwrap fallback (Node 24 is not required).
 - Delete the `eufy-cameras` persist folder if you change account/country and need a clean login.
 - HomeKit Secure Video recording is not included in this version.

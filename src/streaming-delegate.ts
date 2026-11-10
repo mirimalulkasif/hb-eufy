@@ -25,6 +25,7 @@ import {
   startFfmpeg,
   type FfmpegHandle,
 } from './ffmpeg';
+import type { EufyKind } from './device-kinds';
 import { LivestreamManager } from './livestream-manager';
 import type { EufyMega } from './mega';
 import type { EufyCamerasPlatform } from './platform';
@@ -64,6 +65,8 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     private readonly client: EufyMega,
     private readonly serial: string,
     private readonly displayName: string,
+    kind: EufyKind,
+    model: string,
   ) {
     this.hap = api.hap;
     this.ffmpegPath = resolveFfmpegPath(
@@ -71,7 +74,15 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         ? platform.config.ffmpegPath
         : undefined,
     );
-    this.livestream = new LivestreamManager(client, serial, log);
+    this.livestream = new LivestreamManager(client, serial, log, {
+      kind,
+      model,
+      lingerMs: 90_000,
+    });
+  }
+
+  prewarm(): void {
+    void this.livestream.prewarm();
   }
 
   setController(controller: CameraController): void {
@@ -257,18 +268,26 @@ export class StreamingDelegate implements CameraStreamingDelegate {
                   `P2P connect timed out opening livestream for ${this.serial}`,
                 ),
               ),
-            25_000,
+            15_000,
           ),
         ),
       ]);
       const videoPort = await serveReadableOnce(stream.videostream);
       const v = request.video;
 
-      // Prefer bitstream copy on ARM — libx264 re-encode is too heavy for 32-bit Pis.
+      // Bitstream copy + low-delay flags — re-encode is too heavy on 32-bit Pis.
       const videoArgs = [
         '-hide_banner',
         '-loglevel',
         'error',
+        '-fflags',
+        'nobuffer',
+        '-flags',
+        'low_delay',
+        '-probesize',
+        '32',
+        '-analyzeduration',
+        '0',
         '-use_wallclock_as_timestamps',
         '1',
         '-f',
@@ -278,6 +297,8 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         '-an',
         '-c:v',
         'copy',
+        '-flush_packets',
+        '1',
         '-payload_type',
         String(v.pt),
         '-ssrc',
@@ -307,7 +328,6 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         },
       );
 
-      // If ffmpeg never signals start, fail the HomeKit session instead of hanging forever.
       setTimeout(() => {
         if (!callbackFired) {
           const err = new Error('ffmpeg did not start streaming in time');
@@ -315,7 +335,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
           this.stopStream(request.sessionID);
           safeCallback(err);
         }
-      }, 15_000);
+      }, 8_000);
     } catch (err) {
       this.log.error(`Failed to start stream: ${String(err)}`);
       this.stopStream(request.sessionID);

@@ -44,6 +44,7 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
   private readonly country: string;
   private refreshTimer?: NodeJS.Timeout;
   private discovering = false;
+  private didPrewarm = false;
 
   constructor(
     public readonly log: Logging,
@@ -221,17 +222,7 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
         }
       }
 
-      if (devices.length > 0) {
-        for (const accessory of [...this.cached]) {
-          const serial = String(accessory.context.serial || '');
-          if (serial && !seen.has(serial) && !this.handlers.has(serial)) {
-            this.log.info(`Removing stale accessory ${accessory.displayName}`);
-            this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [
-              accessory,
-            ]);
-          }
-        }
-      }
+      this.purgeStaleAccessories(seen);
 
       this.log.info(
         `Eufy Cameras ready — ${this.handlers.size} doorbell/indoor device(s).`,
@@ -241,10 +232,59 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
           'No doorbell/indoor cameras matched. Check the Found lines above. ' +
             'Confirm country matches the Eufy app and that MFA/captcha completed.',
         );
+      } else if (!this.didPrewarm) {
+        this.didPrewarm = true;
+        for (const handler of this.handlers.values()) {
+          handler.prewarmStream();
+        }
+        this.log.info(
+          'Tip: old "No Response" cameras from earlier installs must be deleted in the Home app ' +
+            '(or remove/re-add the Eufy Cameras child bridge). The plugin cannot remove those ghosts.',
+        );
       }
     } finally {
       this.discovering = false;
     }
+  }
+
+  /** Unregister cached Homebridge accessories that are not in the current Mega inventory. */
+  private purgeStaleAccessories(seen: Set<string>): void {
+    const keep: PlatformAccessory[] = [];
+    const remove: PlatformAccessory[] = [];
+    for (const accessory of this.cached) {
+      const serial = String(accessory.context.serial || '');
+      const expectedUuid = serial
+        ? this.api.hap.uuid.generate(`${PLUGIN_NAME}:${serial}`)
+        : '';
+      const orphan =
+        !serial ||
+        !seen.has(serial) ||
+        accessory.UUID !== expectedUuid;
+      if (orphan) {
+        remove.push(accessory);
+        if (serial) {
+          this.handlers.delete(serial);
+        }
+      } else {
+        keep.push(accessory);
+      }
+    }
+    if (remove.length) {
+      this.log.info(
+        `Removing ${remove.length} stale Homebridge accessory(ies) left from older installs…`,
+      );
+      try {
+        this.api.unregisterPlatformAccessories(
+          PLUGIN_NAME,
+          PLATFORM_NAME,
+          remove,
+        );
+      } catch (err) {
+        this.log.warn(`Could not unregister stale accessories: ${String(err)}`);
+      }
+    }
+    this.cached.length = 0;
+    this.cached.push(...keep);
   }
 
   private upsertDevice(info: EufyDeviceInfo): boolean {

@@ -96,6 +96,8 @@ export abstract class BaseCameraAccessory {
       this.client,
       this.serial,
       this.displayName,
+      this.kind,
+      this.model,
     );
 
     this.cameraController = new hap.CameraController({
@@ -147,6 +149,11 @@ export abstract class BaseCameraAccessory {
     this.displayName = name;
     this.model = model;
     this.accessory.displayName = name;
+  }
+
+  /** Warm P2P so the next HomeKit open is faster (indoor cameras). */
+  prewarmStream(): void {
+    void this.streaming?.prewarm();
   }
 
   triggerMotion(active = true): void {

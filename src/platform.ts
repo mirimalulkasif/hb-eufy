@@ -26,6 +26,7 @@ import {
   DEFAULT_EVENT_DURATION_SECONDS,
   DEFAULT_P2P_SETUP,
   DEFAULT_POLLING_MINUTES,
+  EMPTY_RETRY_SECONDS,
   PLATFORM_NAME,
   PLUGIN_NAME,
 } from './settings';
@@ -41,6 +42,9 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
   public client?: EufySecurity;
   private readonly persistDir: string;
   public readonly eventHoldSeconds: number;
+  private readonly pollingMinutes: number;
+  private refreshTimer?: NodeJS.Timeout;
+  private discovering = false;
 
   constructor(
     public readonly log: Logging,
@@ -53,6 +57,10 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
     this.eventHoldSeconds = Number(
       config.eventDurationSeconds || DEFAULT_EVENT_DURATION_SECONDS,
     );
+    this.pollingMinutes = Math.max(
+      1,
+      Number(config.pollingIntervalMinutes ?? DEFAULT_POLLING_MINUTES),
+    );
 
     if (!fs.existsSync(this.persistDir)) {
       fs.mkdirSync(this.persistDir, { recursive: true });
@@ -62,6 +70,10 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
       void this.start();
     });
     api.on('shutdown', () => {
+      if (this.refreshTimer) {
+        clearTimeout(this.refreshTimer);
+        this.refreshTimer = undefined;
+      }
       try {
         this.client?.close();
       } catch {
@@ -131,12 +143,44 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
 
       this.log.info('Connected to Eufy cloud.');
       await this.discover();
+      this.scheduleRefresh();
     } catch (err) {
       this.log.error(`Eufy Cameras failed to start: ${String(err)}`);
       this.log.warn(
         'If the cloud asks for MFA/captcha, set mfaCode or captchaId/captchaCode in the plugin config and restart.',
       );
     }
+  }
+
+  private scheduleRefresh(): void {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+    }
+    const empty = this.handlers.size === 0;
+    const delayMs = empty
+      ? EMPTY_RETRY_SECONDS * 1000
+      : this.pollingMinutes * 60 * 1000;
+    this.log.info(
+      empty
+        ? `No cameras yet — retrying discovery in ${EMPTY_RETRY_SECONDS}s…`
+        : `Next device refresh in ${this.pollingMinutes} minute(s).`,
+    );
+    this.refreshTimer = setTimeout(() => {
+      void this.refreshDevices();
+    }, delayMs);
+  }
+
+  private async refreshDevices(): Promise<void> {
+    if (!this.client) {
+      return;
+    }
+    this.log.info('Refreshing Eufy devices…');
+    try {
+      await this.discover();
+    } catch (err) {
+      this.log.warn(`Refresh failed: ${String(err)}`);
+    }
+    this.scheduleRefresh();
   }
 
   private async loadDevices(timeoutMs: number): Promise<Device[]> {
@@ -212,60 +256,67 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
   }
 
   private async discover(): Promise<void> {
-    if (!this.client) {
+    if (!this.client || this.discovering) {
       return;
     }
-
-    this.log.info('Loading devices from Eufy cloud…');
+    this.discovering = true;
     try {
-      await this.client.refreshCloudData();
-    } catch (err) {
-      this.log.warn(`Cloud refresh warning: ${String(err)}`);
-    }
+      this.log.info('Loading devices from Eufy cloud…');
+      try {
+        await this.client.refreshCloudData();
+      } catch (err) {
+        this.log.warn(`Cloud refresh warning: ${String(err)}`);
+      }
 
-    // First attempt — eufy-security-client can hang forever on devicesLoaded.
-    let devices = await this.loadDevices(45_000);
-    if (devices.length === 0) {
-      this.log.warn(
-        'No devices yet (or load timed out). Waiting 15s for device events…',
-      );
-      await new Promise((resolve) => setTimeout(resolve, 15_000));
-      devices = await this.loadDevices(10_000);
-    }
+      // First attempt — eufy-security-client can hang forever on devicesLoaded.
+      let devices = await this.loadDevices(45_000);
+      if (devices.length === 0 && this.handlers.size === 0) {
+        this.log.warn(
+          'No devices yet (or load timed out). Waiting 15s for device events…',
+        );
+        await new Promise((resolve) => setTimeout(resolve, 15_000));
+        devices = await this.loadDevices(10_000);
+      }
 
-    this.log.info(`Cloud returned ${devices.length} device(s).`);
-    const seen = new Set<string>();
-    for (const device of devices) {
-      const type = device.getDeviceType();
-      const kind = classifyDevice(device);
+      this.log.info(`Cloud returned ${devices.length} device(s).`);
+      const seen = new Set<string>();
+      for (const device of devices) {
+        const type = device.getDeviceType();
+        const kind = classifyDevice(device);
+        this.log.info(
+          `Found "${device.getName()}" sn=${device.getSerial()} ` +
+            `type=${type} model=${device.getModel() || '?'} → ${kind ?? 'skipped'}`,
+        );
+        const serial = device.getSerial();
+        if (this.upsertDevice(device)) {
+          seen.add(serial);
+        }
+      }
+
+      // Only prune unknowns when we actually received a device list.
+      if (devices.length > 0) {
+        for (const accessory of [...this.cached]) {
+          const serial = String(accessory.context.serial || '');
+          if (serial && !seen.has(serial) && !this.handlers.has(serial)) {
+            this.log.info(`Removing stale accessory ${accessory.displayName}`);
+            this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [
+              accessory,
+            ]);
+          }
+        }
+      }
+
       this.log.info(
-        `Found "${device.getName()}" sn=${device.getSerial()} ` +
-          `type=${type} model=${device.getModel() || '?'} → ${kind ?? 'skipped'}`,
+        `Eufy Cameras ready — ${this.handlers.size} doorbell/indoor device(s).`,
       );
-      const serial = device.getSerial();
-      if (this.upsertDevice(device)) {
-        seen.add(serial);
+      if (this.handlers.size === 0) {
+        this.log.warn(
+          'No doorbell/indoor cameras matched. Will keep retrying. ' +
+            'If this persists, confirm the Eufy account owns those cameras and try acceptInvitations / MFA.',
+        );
       }
-    }
-
-    for (const accessory of [...this.cached]) {
-      const serial = String(accessory.context.serial || '');
-      if (serial && !seen.has(serial) && !this.handlers.has(serial)) {
-        this.log.info(`Removing stale accessory ${accessory.displayName}`);
-        this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [
-          accessory,
-        ]);
-      }
-    }
-
-    this.log.info(
-      `Eufy Cameras ready — ${this.handlers.size} doorbell/indoor device(s).`,
-    );
-    if (this.handlers.size === 0) {
-      this.log.warn(
-        'No doorbell/indoor cameras matched. Check the "Found … → skipped" lines above for device types, ' +
-          'confirm the Eufy account owns those cameras, and try acceptInvitations / MFA if needed.',
-      );
+    } finally {
+      this.discovering = false;
     }
   }
 

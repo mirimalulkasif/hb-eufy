@@ -39,7 +39,8 @@
         "title": "Cloud polling interval (minutes)",
         "type": "integer",
         "default": 10,
-        "minimum": 5
+        "minimum": 1,
+        "description": "How often to refresh the device list after cameras are found. When none are found yet, the plugin retries every 60 seconds."
       },
       "eventDurationSeconds": {
         "title": "Motion hold time (seconds)",

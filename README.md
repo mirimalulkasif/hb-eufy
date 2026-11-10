@@ -2,7 +2,7 @@
 
 Homebridge plugin for **Eufy** doorbell and indoor cameras with **HomeKit live video**.
 
-Uses the modern **Eufy Mega (v6)** cloud via [`@mega-yfue/eufy-sdk`](https://www.npmjs.com/package/@mega-yfue/eufy-sdk). The old Eufy API returns empty device lists for many accounts — this plugin does not use that legacy path.
+Talks to the modern **Eufy Mega (v6)** cloud (vendored SDK with Node 22 / 32-bit support). The old Eufy API returns empty device lists for many accounts — this plugin does not use that legacy path.
 
 Exposes:
 
@@ -15,10 +15,12 @@ This project is not affiliated with Anker or Eufy.
 
 ## Requirements
 
-- **Node.js `>= 24.5.0`** (required by `@mega-yfue/eufy-sdk`)
+- **Node.js `>= 22.12.0`** — including **32-bit ARM (armv7l)** on Homebridge images that cannot install Node 24
 - Homebridge `^1.8` or `^2`
 - Working LAN path to the camera / HomeBase for live video
 - `ffmpeg` (bundled via `ffmpeg-for-homebridge`, or set `ffmpegPath`)
+
+HomeBase S1 Pro (T9000) WebRTC needs `node-datachannel` (64-bit only). Doorbell and indoor cameras use P2P and work on 32-bit.
 
 ## Install
 
@@ -56,11 +58,10 @@ Captcha works the same way with `captcha.png` + `captchaCode` / `captcha-code.tx
 
 After a successful login the session is stored, so later starts usually need no code.
 
-Also requires **Node.js ≥ 24.5** (Mega SDK).
-
 ## Notes
 
 - Live video uses Mega P2P + ffmpeg remux to HomeKit SRTP.
+- On Node 22, E2E media keys use a PKCS#1 unwrap fallback (Node 24 is not required).
 - Delete the `eufy-cameras` persist folder if you change account/country and need a clean login.
 - HomeKit Secure Video recording is not included in this version.
 

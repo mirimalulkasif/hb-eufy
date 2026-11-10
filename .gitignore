@@ -1,8 +1,10 @@
 node_modules/
-dist/
+/dist/
+vendor/**/node_modules/
 *.tsbuildinfo
 .DS_Store
 .env
 *.log
 coverage/
 .persistent/
+*.tgz

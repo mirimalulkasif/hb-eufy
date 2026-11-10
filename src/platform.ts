@@ -91,7 +91,7 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
     }
 
     this.log.info(
-      `Using Eufy Mega cloud (country=${this.country}), persist=${this.persistDir}`,
+      `Using Eufy Mega cloud (country=${this.country}, node=${process.version}, arch=${process.arch}), persist=${this.persistDir}`,
     );
 
     try {
@@ -126,7 +126,7 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
     client.on('petDetection', onMotion);
     client.on('soundDetected', onMotion);
     client.on('cryingDetected', onMotion);
-    client.on('doorbellPress', (event) => {
+    client.on('doorbellPress', (event: { deviceSn?: string }) => {
       const sn = event.deviceSn;
       const handler = sn ? this.handlers.get(sn) : undefined;
       if (handler instanceof DoorbellAccessory) {
@@ -138,7 +138,7 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
     client.on('sessionExpired', () => {
       this.log.warn('Eufy session expired — will re-login on next refresh');
     });
-    client.on('error', (err) => {
+    client.on('error', (err: unknown) => {
       this.log.warn(`Eufy Mega error: ${String(err)}`);
     });
   }

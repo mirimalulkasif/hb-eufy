@@ -45,7 +45,7 @@ export class LivestreamManager {
           this.active = undefined;
         }
       });
-      stream.on('error', (err) => {
+      stream.on('error', (err: Error) => {
         this.log.debug(`Livestream error ${this.serial}: ${String(err)}`);
       });
     }

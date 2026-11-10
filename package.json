@@ -1,8 +1,8 @@
 {
   "name": "homebridge-eufy-cameras",
   "displayName": "Eufy Cameras",
-  "version": "2.0.3",
-  "description": "Homebridge plugin for Eufy doorbell and indoor cameras — HomeKit live video via Eufy Mega (v6) cloud.",
+  "version": "2.0.4",
+  "description": "Homebridge plugin for Eufy doorbell and indoor cameras \u2014 HomeKit live video via Eufy Mega (v6) cloud.",
   "license": "MIT",
   "keywords": [
     "homebridge-plugin",
@@ -13,15 +13,16 @@
     "security"
   ],
   "engines": {
-    "node": ">=24.5.0",
+    "node": ">=22.12.0",
     "homebridge": "^1.8.0 || ^2.0.0"
   },
   "main": "dist/index.js",
   "files": [
-    "dist",
-    "config.schema.json",
+    "LICENSE",
     "README.md",
-    "LICENSE"
+    "config.schema.json",
+    "dist",
+    "vendor/eufy-sdk"
   ],
   "scripts": {
     "build": "tsc",
@@ -30,7 +31,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@mega-yfue/eufy-sdk": "^0.5.0",
+    "@mega-yfue/eufy-sdk": "file:./vendor/eufy-sdk",
     "ffmpeg-for-homebridge": "^2.2.0",
     "pick-port": "^2.1.0"
   },

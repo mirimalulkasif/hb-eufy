@@ -1,0 +1,54 @@
+/**
+ * Station topology and per-station channel addressing, from the device records alone.
+ *
+ * Both sides of the P2P wire key on a device's channel within its station: a media start and every
+ * per-channel command address it, and an inbound frame is attributed to the device on its channel. Resolving
+ * it once, here, keeps the two sides from ever disagreeing about which device a channel means.
+ *
+ * @module transport/p2p/station-channels
+ * @internal
+ */
+import type { EufyDevice } from "../../core/types.js";
+/**
+ * The station a device's traffic belongs to, from its cloud record and its own serial.
+ *
+ * `parent_sn` carries the parent on a HomeBase-attached device. `station_sn` is frequently absent there —
+ * empty on every attached sensor of a T8010 — and serves only as a fallback. An empty string states no
+ * station.
+ *
+ * A device naming no parent answers its own serial, so every device has a station.
+ */
+export declare function resolvedStationSn(raw: Record<string, unknown>, sn: string): string;
+/**
+ * The parent station a device's traffic belongs to — the session key the router opens and the station the
+ * frame resolver attributes by.
+ *
+ * `parent_sn` on the cloud record is the field that is actually populated for a HomeBase-attached device, so
+ * it wins; `stationSn` is frequently absent (observed empty on every attached sensor of a T8010), so keying on
+ * it alone silently resolves an attached device to ITSELF and no frame ever matches. Answering the device's
+ * OWN serial is what "stands alone" means.
+ */
+export declare function stationOf(dev: EufyDevice): string;
+/**
+ * A device's channel within its station, or why it has none. `shared` keeps the channel it `claimed`, so a
+ * frame arriving on it is known to belong to one of the claimants rather than to the station.
+ */
+export type StationChannel = {
+    channel: number;
+} | {
+    issue: "missing";
+} | {
+    issue: "shared";
+    claimed: number;
+};
+/**
+ * The channel each device is addressed by within its station.
+ *
+ * A standalone device is its own station, addressed by the channel its record states, or 0. An attached
+ * device has a channel only when its record states one that no other device attached to the same station
+ * also states. A missing channel names no device, and a channel two attached devices both state cannot say
+ * which of them it means, so either resolves to an issue rather than to a channel: guessing would address
+ * another device, streaming its video or attributing its frames under this serial. Every attached device
+ * counts towards a clash, whatever its kind, and the answer does not depend on list order.
+ */
+export declare function stationChannels(devices: readonly EufyDevice[]): Map<string, StationChannel>;

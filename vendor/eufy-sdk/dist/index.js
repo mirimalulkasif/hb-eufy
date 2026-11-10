@@ -3683,7 +3683,13 @@ var isStation9000 = (ctx) => ctx.deviceType === DeviceType.STATION_9000;
 var isNvrT8N00 = (ctx) => ctx.model === "T8N00";
 var isNvrMediaCamera = (ctx) => ctx.model === "T8E00" || ctx.model === "T8P00";
 var isNvrDualLensCamera = (ctx) => ctx.model === "T8E00";
-var isCallDoorbell = (ctx) => ctx.model === "T8223" || ctx.model === "T8224";
+var isCallDoorbell = (ctx) => {
+  // Portal-call (WebRTC) live for standalone T8223/T8224 needs node-datachannel, which has no
+  // prebuild for 32-bit ARM. Fall back to classic P2P on those hosts so doorbell live can still try.
+  if (process.arch === "arm" || process.arch === "ia32")
+    return false;
+  return ctx.model === "T8223" || ctx.model === "T8224";
+};
 var isAiotVacuum = (ctx) => ctx.category !== "eufy_home_tuya";
 var isTuyaVacuum = (ctx) => ctx.category === "eufy_home_tuya";
 var isVideoSmartLock = (ctx) => ctx.deviceType === DeviceType.LOCK_8530;

@@ -20,7 +20,7 @@ This project is not affiliated with Anker or Eufy.
 - Working LAN path to the camera / HomeBase for live video
 - `ffmpeg` (bundled via `ffmpeg-for-homebridge`, or set `ffmpegPath`)
 
-HomeBase S1 Pro (T9000) WebRTC needs `node-datachannel` (64-bit only). Doorbell and indoor cameras use P2P and work on 32-bit.
+HomeBase S1 Pro (T9000) WebRTC needs `node-datachannel` (64-bit only). Indoor cameras use P2P on 32-bit. Standalone T8223/T8224 doorbells normally use WebRTC; on 32-bit ARM this plugin falls back to P2P for live view (ring/motion still work via push).
 
 ## Install
 

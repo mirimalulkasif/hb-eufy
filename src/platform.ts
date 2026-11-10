@@ -38,7 +38,7 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
 
   private readonly cached: PlatformAccessory[] = [];
   private readonly handlers = new Map<string, AccessoryHandler>();
-  private client?: EufySecurity;
+  public client?: EufySecurity;
   private readonly persistDir: string;
   public readonly eventHoldSeconds: number;
 

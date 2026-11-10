@@ -66,6 +66,11 @@
         "title": "Accept shared-device invitations",
         "type": "boolean",
         "default": false
+      },
+      "ffmpegPath": {
+        "title": "Custom ffmpeg path",
+        "type": "string",
+        "description": "Optional. Defaults to the bundled ffmpeg-for-homebridge binary, then system ffmpeg."
       }
     }
   }

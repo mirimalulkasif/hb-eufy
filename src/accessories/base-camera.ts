@@ -1,4 +1,5 @@
 import type {
+  CameraController,
   Characteristic,
   Logging,
   PlatformAccessory,
@@ -10,12 +11,15 @@ import { PropertyName } from 'eufy-security-client';
 
 import type { EufyCamerasPlatform } from '../platform';
 import type { EufyKind } from '../device-kinds';
+import { StreamingDelegate } from '../streaming-delegate';
 
 export abstract class BaseCameraAccessory {
   protected readonly Service: typeof Service;
   protected readonly Characteristic: typeof Characteristic;
   protected motionService?: Service;
   protected switchService?: Service;
+  protected streaming?: StreamingDelegate;
+  protected cameraController?: CameraController;
   private motionTimer?: NodeJS.Timeout;
 
   constructor(
@@ -41,6 +45,7 @@ export abstract class BaseCameraAccessory {
 
     this.setupMotion();
     this.setupEnableSwitch();
+    this.setupCameraStreaming();
   }
 
   protected getOrAddService(
@@ -93,6 +98,72 @@ export abstract class BaseCameraAccessory {
         }
       });
     this.switchService.updateCharacteristic(this.Characteristic.On, enabled);
+  }
+
+  private setupCameraStreaming(): void {
+    if (!this.platform.client) {
+      this.log.warn(
+        `Skipping HomeKit camera for ${this.device.getSerial()} — client not ready`,
+      );
+      return;
+    }
+
+    const hap = this.platform.api.hap;
+    this.streaming = new StreamingDelegate(
+      this.platform,
+      this.platform.api,
+      this.log,
+      this.device,
+    );
+
+    this.cameraController = new hap.CameraController({
+      cameraStreamCount: 2,
+      delegate: this.streaming,
+      streamingOptions: {
+        supportedCryptoSuites: [hap.SRTPCryptoSuites.AES_CM_128_HMAC_SHA1_80],
+        video: {
+          resolutions: [
+            [320, 180, 30],
+            [320, 240, 15],
+            [480, 270, 30],
+            [640, 360, 30],
+            [1280, 720, 30],
+            [1920, 1080, 30],
+          ],
+          codec: {
+            profiles: [
+              hap.H264Profile.BASELINE,
+              hap.H264Profile.MAIN,
+              hap.H264Profile.HIGH,
+            ],
+            levels: [
+              hap.H264Level.LEVEL3_1,
+              hap.H264Level.LEVEL3_2,
+              hap.H264Level.LEVEL4_0,
+            ],
+          },
+        },
+        audio: {
+          twoWayAudio: false,
+          codecs: [
+            {
+              type: hap.AudioStreamingCodecType.AAC_ELD,
+              samplerate: hap.AudioStreamingSamplerate.KHZ_16,
+            },
+            {
+              type: hap.AudioStreamingCodecType.OPUS,
+              samplerate: hap.AudioStreamingSamplerate.KHZ_24,
+            },
+          ],
+        },
+      },
+    });
+
+    this.streaming.setController(this.cameraController);
+    this.accessory.configureController(this.cameraController);
+    this.log.info(
+      `HomeKit camera enabled for ${this.device.getName()} (${this.device.getSerial()})`,
+    );
   }
 
   updateDevice(device: Device): void {

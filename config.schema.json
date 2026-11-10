@@ -1,0 +1,72 @@
+{
+  "pluginAlias": "EufyCameras",
+  "pluginType": "platform",
+  "singular": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Platform name",
+        "type": "string",
+        "default": "Eufy Cameras",
+        "required": true
+      },
+      "username": {
+        "title": "Eufy account email",
+        "type": "string",
+        "required": true
+      },
+      "password": {
+        "title": "Eufy account password",
+        "type": "string",
+        "required": true,
+        "x-schema-form": { "type": "password" }
+      },
+      "country": {
+        "title": "Country code",
+        "type": "string",
+        "default": "US",
+        "description": "ISO country used by the Eufy cloud (e.g. US, DE, IL).",
+        "required": true
+      },
+      "trustedDeviceName": {
+        "title": "Trusted device name",
+        "type": "string",
+        "default": "Homebridge",
+        "description": "Name shown in the Eufy app for this connection."
+      },
+      "pollingIntervalMinutes": {
+        "title": "Cloud polling interval (minutes)",
+        "type": "integer",
+        "default": 10,
+        "minimum": 5
+      },
+      "eventDurationSeconds": {
+        "title": "Motion hold time (seconds)",
+        "type": "integer",
+        "default": 15,
+        "minimum": 5
+      },
+      "mfaCode": {
+        "title": "MFA / 2FA code",
+        "type": "string",
+        "description": "Only needed when Eufy asks for a one-time login code. Clear after a successful connect."
+      },
+      "captchaId": {
+        "title": "Captcha id",
+        "type": "string",
+        "description": "From Homebridge logs when a captcha is requested."
+      },
+      "captchaCode": {
+        "title": "Captcha code",
+        "type": "string",
+        "description": "Solution for the captcha challenge."
+      },
+      "acceptInvitations": {
+        "title": "Accept shared-device invitations",
+        "type": "boolean",
+        "default": false
+      }
+    }
+  }
+}

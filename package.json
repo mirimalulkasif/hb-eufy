@@ -1,0 +1,51 @@
+{
+  "name": "homebridge-eufy-cameras",
+  "displayName": "Eufy Cameras",
+  "version": "1.0.0",
+  "description": "Homebridge plugin for Eufy doorbell and indoor cameras — motion, ring events, and on/off controls.",
+  "license": "MIT",
+  "keywords": [
+    "homebridge-plugin",
+    "eufy",
+    "doorbell",
+    "camera",
+    "indoor-camera",
+    "security"
+  ],
+  "engines": {
+    "node": ">=20.0.0",
+    "homebridge": "^1.6.0 || ^2.0.0"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "config.schema.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "eufy-security-client": "3.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "homebridge": "^1.11.0",
+    "typescript": "^5.7.0"
+  },
+  "peerDependencies": {
+    "homebridge": "^1.6.0 || ^2.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mirimalulkasif/hb-eufy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mirimalulkasif/hb-eufy/issues"
+  },
+  "homepage": "https://github.com/mirimalulkasif/hb-eufy#readme"
+}

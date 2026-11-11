@@ -31199,10 +31199,9 @@ var EufyMega = class extends EventEmitter14 {
         await this.registry.getDevices();
       if (this.mega.auth?.userId !== account)
         return;
-      const caps = this.registry.capabilitiesForDevice(deviceSn);
-      if (caps && hasProvidedAction(caps, "snapshotStored")) {
-        this.storedImages.observe(deviceSn, candidate.url);
-      }
+      // Always retain push thumbnails for picture-stream doorbells — do not gate on
+      // snapshotStored capability evidence (some models omit it from the cap map).
+      this.storedImages.observe(deviceSn, candidate.url);
     } catch (e) {
       this.reportError(e);
     }

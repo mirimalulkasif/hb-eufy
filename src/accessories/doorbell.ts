@@ -31,7 +31,7 @@ export class DoorbellAccessory extends BaseCameraAccessory {
       this.Characteristic.ProgrammableSwitchEvent.SINGLE_PRESS,
     );
     this.triggerMotion(true);
-    void this.streaming?.refreshStoredSnapshot();
+    this.scheduleStillRefresh();
     this.log.info(`Doorbell ring: ${this.displayName} (${this.serial})`);
   }
 }

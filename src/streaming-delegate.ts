@@ -87,6 +87,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       model,
       lingerMs: 90_000,
     });
+    this.loadPersistedStill();
     if (this.mode === 'stills') {
       this.log.info(
         `${displayName}: picture stream mode (motion/ring + push stills, no live video)`,
@@ -105,10 +106,33 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     this.controller = controller;
   }
 
+  private stillCachePath(): string {
+    return path.join(this.platform.persistDir, `still-${this.serial}.jpg`);
+  }
+
   /** Update the still used for Home tiles / picture stream (e.g. after motion/ring). */
   updateSnapshot(jpeg: Buffer): void {
     if (jpeg.length > 100) {
       this.cachedSnapshot = jpeg;
+      try {
+        fs.writeFileSync(this.stillCachePath(), jpeg);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  private loadPersistedStill(): void {
+    try {
+      const file = this.stillCachePath();
+      if (fs.existsSync(file)) {
+        const buf = fs.readFileSync(file);
+        if (buf.length > 100) {
+          this.cachedSnapshot = buf;
+        }
+      }
+    } catch {
+      // ignore
     }
   }
 
@@ -121,13 +145,13 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         const device = await this.client.getDevice(this.serial);
         const stored = await device.camera?.()?.snapshotStored?.();
         if (stored && stored.length > 100) {
-          this.cachedSnapshot = stored;
-          this.log.debug(
-            `Updated still for ${this.displayName} (${stored.length} bytes)`,
+          this.updateSnapshot(stored);
+          this.log.info(
+            `Got push still for ${this.displayName} (${stored.length} bytes)`,
           );
         }
       } catch (err) {
-        this.log.debug(`Still refresh failed: ${String(err)}`);
+        this.log.debug(`Still refresh: ${String(err)}`);
       }
     })().finally(() => {
       this.refreshInFlight = undefined;
@@ -287,44 +311,77 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       `HomeKit picture stream for ${this.displayName} (${this.serial})`,
     );
     await this.refreshStoredSnapshot();
-    const jpeg = this.cachedSnapshot ?? placeholderJpeg();
-    const stillPath = path.join(
-      os.tmpdir(),
-      `eufy-still-${this.serial}-${request.sessionID}.jpg`,
-    );
-    fs.writeFileSync(stillPath, jpeg);
-    active.stillPath = stillPath;
 
     const v = request.video;
-    const fps = Math.min(5, Math.max(1, v.fps || 2));
+    const width = Math.max(320, v.width - (v.width % 2));
+    const height = Math.max(240, v.height - (v.height % 2));
+    const fps = 2;
+    const hasStill = Boolean(this.cachedSnapshot && this.cachedSnapshot.length > 100);
+
     const videoArgs = [
       '-hide_banner',
       '-loglevel',
       'error',
       '-re',
-      '-loop',
-      '1',
-      '-framerate',
-      String(fps),
-      '-i',
-      stillPath,
+    ];
+
+    if (hasStill) {
+      const stillPath = path.join(
+        os.tmpdir(),
+        `eufy-still-${this.serial}-${request.sessionID}.jpg`,
+      );
+      fs.writeFileSync(stillPath, this.cachedSnapshot!);
+      active.stillPath = stillPath;
+      this.log.info(
+        `Picture stream using push still (${this.cachedSnapshot!.length} bytes)`,
+      );
+      videoArgs.push(
+        '-loop',
+        '1',
+        '-framerate',
+        String(fps),
+        '-i',
+        stillPath,
+      );
+    } else {
+      // Visible gray frame when no push thumbnail yet (1x1 JPEG looks black in Home).
+      this.log.warn(
+        `No push still for ${this.displayName} yet — showing placeholder until the next ring/motion thumbnail arrives`,
+      );
+      videoArgs.push(
+        '-f',
+        'lavfi',
+        '-i',
+        `color=c=0x3a3a3a:s=${width}x${height}:r=${fps}`,
+      );
+    }
+
+    videoArgs.push(
       '-an',
       '-c:v',
       'libx264',
       '-preset',
       'ultrafast',
       '-tune',
-      'stillimage',
+      'zerolatency',
       '-pix_fmt',
       'yuv420p',
+      '-g',
+      String(fps * 2),
+      '-keyint_min',
+      String(fps),
+      '-force_key_frames',
+      `expr:gte(t,n_forced*${(1 / fps).toFixed(3)})`,
       '-vf',
-      `scale=${v.width}:${v.height}:force_original_aspect_ratio=decrease,pad=${v.width}:${v.height}:(ow-iw)/2:(oh-ih)/2`,
+      `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`,
       '-profile:v',
       'baseline',
       '-level:v',
       '3.1',
       '-b:v',
-      `${Math.max(100, v.max_bit_rate)}k`,
+      `${Math.max(150, Math.min(v.max_bit_rate || 300, 800))}k`,
+      '-bufsize',
+      '800k',
       '-payload_type',
       String(v.pt),
       '-ssrc',
@@ -336,14 +393,14 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       '-srtp_out_params',
       sessionInfo.videoSRTP.toString('base64'),
       `srtp://${sessionInfo.address}:${sessionInfo.videoPort}?rtcpport=${sessionInfo.videoPort}&pkt_size=1128`,
-    ];
+    );
 
     active.video = startFfmpeg(
       this.ffmpegPath,
       videoArgs,
       () => {
         this.log.info(
-          `Picture-streaming ${this.displayName} ${v.width}x${v.height}@${fps}fps`,
+          `Picture-streaming ${this.displayName} ${width}x${height}@${fps}fps (still=${hasStill})`,
         );
         safeCallback();
       },
@@ -354,24 +411,9 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       },
     );
 
-    // Periodically pull a newer push thumbnail into the file for the next open;
-    // active ffmpeg keeps the still it opened with (stable picture stream).
     active.stillRefresh = setInterval(() => {
-      void this.refreshStoredSnapshot().then(() => {
-        if (this.cachedSnapshot && active.stillPath) {
-          try {
-            fs.writeFileSync(active.stillPath, this.cachedSnapshot);
-          } catch {
-            // ignore
-          }
-        }
-      });
-    }, 15_000);
-
-    setTimeout(() => {
-      if (![...this.ongoing.values()].includes(active)) return;
-      // callback already handled by startFfmpeg fallback
-    }, 8_000);
+      void this.refreshStoredSnapshot();
+    }, 10_000);
   }
 
   private async startLiveStream(

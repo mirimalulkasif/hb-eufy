@@ -168,7 +168,7 @@ export abstract class BaseCameraAccessory {
       clearTimeout(this.motionTimer);
     }
     if (active) {
-      void this.streaming?.refreshStoredSnapshot();
+      this.scheduleStillRefresh();
       const hold = this.platform.eventHoldSeconds * 1000;
       this.motionTimer = setTimeout(() => {
         this.motionService?.updateCharacteristic(
@@ -176,6 +176,15 @@ export abstract class BaseCameraAccessory {
           false,
         );
       }, hold);
+    }
+  }
+
+  /** Pull push thumbnails that often arrive 1–8s after motion/ring. */
+  scheduleStillRefresh(): void {
+    for (const ms of [500, 2_000, 5_000, 10_000]) {
+      setTimeout(() => {
+        void this.streaming?.refreshStoredSnapshot();
+      }, ms);
     }
   }
 }

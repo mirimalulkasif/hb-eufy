@@ -38,7 +38,7 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
   private readonly cached: PlatformAccessory[] = [];
   private readonly handlers = new Map<string, AccessoryHandler>();
   public client?: EufyMega;
-  private readonly persistDir: string;
+  readonly persistDir: string;
   public readonly eventHoldSeconds: number;
   private readonly pollingMinutes: number;
   private readonly country: string;
@@ -143,6 +143,29 @@ export class EufyCamerasPlatform implements DynamicPlatformPlugin {
       } else {
         handler?.triggerMotion(true);
       }
+    });
+    // Push thumbnails arrive shortly after the event — poll the retained still a few times.
+    client.on(
+      'push',
+      (ev: { deviceSn?: string; thumbnailUrl?: string; eventName?: string }) => {
+        const sn = ev.deviceSn;
+        if (!sn) {
+          return;
+        }
+        const handler = this.handlers.get(sn);
+        if (!handler) {
+          return;
+        }
+        if (ev.thumbnailUrl) {
+          this.log.info(
+            `Push thumbnail for ${sn} (${ev.eventName || 'event'}) — refreshing still…`,
+          );
+        }
+        handler.scheduleStillRefresh();
+      },
+    );
+    client.on('pushConnect', () => {
+      this.log.info('Eufy push channel connected (thumbnails/events).');
     });
     client.on('sessionExpired', () => {
       this.log.warn('Eufy session expired — will re-login on next refresh');
